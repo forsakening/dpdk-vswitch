@@ -1,0 +1,34 @@
+#@20180407 by Shawn.Z
+
+# SPDX-License-Identifier: BSD-3-Clause
+# Copyright(c) 2010-2014 Intel Corporation
+
+# binary name
+APP = vswitch
+
+ifeq ($(DEBUG),Y)
+EXTRA_CFLAGS=-g
+endif
+
+# all source are stored in SRCS-y
+SRCS-y := src/sw_main.c 
+SRCS-y += src/sw_dpdk.c 
+SRCS-y += src/sw_command.c
+
+RTE_SDK=/usr/local/dpdk/share/dpdk/
+
+ifeq ($(RTE_SDK),)
+$(error "Please define RTE_SDK environment variable")
+endif
+
+# Default target, can be overridden by command line or environment
+RTE_TARGET ?= x86_64-native-linuxapp-gcc
+
+include $(RTE_SDK)/mk/rte.vars.mk
+
+CFLAGS += -O3
+CFLAGS += $(WERROR_FLAGS)
+
+include $(RTE_SDK)/mk/rte.extapp.mk
+
+
