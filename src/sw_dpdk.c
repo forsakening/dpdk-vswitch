@@ -1,4 +1,5 @@
-//@20180408 by Shawn.Z
+//@20180408 by Shawn.Z v1.0 just for test 2 ports
+//@20180411 by Shawn.Z v1.1 support configuration
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -40,18 +41,14 @@
 //private 
 #include "sw_dpdk.h"
 #include "sw_command.h"
+#include "sw_config.h"
 
 #define RTE_LOGTYPE_VSWITCH RTE_LOGTYPE_USER1
 
-#define SW_DPDK_MAX_PORT 24
-#define SW_DPDK_MAX_DELAY 10
-//#define SW_DPDK_MAX_MBUF_NUM (2^27 - 1)
-#define SW_DPDK_MAX_MBUF_NUM 8192
-
 static volatile bool force_quit = false;
+static volatile bool sw_dpdk_eal_init = false;
 
 #define MAX_PKT_BURST 32
-#define BURST_TX_DRAIN_US 100 /* TX drain every ~100us */
 #define MEMPOOL_CACHE_SIZE 256
 
 /*
@@ -63,49 +60,36 @@ static uint16_t nb_rxd = RTE_TEST_RX_DESC_DEFAULT;
 static uint16_t nb_txd = RTE_TEST_TX_DESC_DEFAULT;
 
 /* ethernet addresses of ports */
-static struct ether_addr sw_ports_eth_addr[RTE_MAX_ETHPORTS];
-
-/* mask of enabled ports */
+static struct ether_addr sw_ports_eth_addr[SW_DPDK_MAX_PORT];
 static uint32_t sw_enabled_port_mask = 0;
+static volatile bool start_work = false;
+static SW_PORT_PEER sw_port_peer[SW_DPDK_MAX_PORT] = {{0}}; // use rx port as the array id
+static uint64_t sw_used_core_mask = 1; // core 0 is used default
+static uint32_t sw_used_port_mask = 0;
+static uint32_t sw_used_rx_port_mask = 0;
+static uint16_t sw_dpdk_total_port = 0;
+static SW_PORT_MODE sw_port_mode_map[SW_DPDK_MAX_PORT] = {0};
+static SW_CORE_CONF sw_core_conf[SW_DPDK_MAX_CORE] = {{0}};
 
-static volatile bool start_work = false; 
-
-typedef enum
-{
-	MODE_NONE = 0,
-	MODE_RX = 1,
-	MODE_TX = 2
-}PORT_MODE;
-
-struct sw_port_conf {
-	uint16_t  coreid;
-	uint16_t  delay_s;
-	PORT_MODE portmode;
-	struct rte_ring* rx_ring;
-	struct rte_ring* tx_ring;
-} __rte_cache_aligned;
-struct sw_port_conf sw_port_conf[SW_DPDK_MAX_PORT] = {{0}};
-
-static struct rte_eth_conf port_conf = {
+static struct rte_eth_conf sw_nic_conf = {
 	.rxmode = {
+		.mq_mode = ETH_MQ_RX_RSS,
+		.max_rx_pkt_len = ETHER_MAX_LEN,
 		.split_hdr_size = 0,
 		.ignore_offload_bitfield = 1,
-		.offloads = DEV_RX_OFFLOAD_CRC_STRIP,
+		.offloads = (DEV_RX_OFFLOAD_CRC_STRIP |
+			     DEV_RX_OFFLOAD_CHECKSUM),
+	},
+	.rx_adv_conf = {
+		.rss_conf = {
+			.rss_key = NULL,
+			.rss_hf = ETH_RSS_IP,
+		},
 	},
 	.txmode = {
 		.mq_mode = ETH_MQ_TX_NONE,
 	},
 };
-
-struct rte_mempool * pktmbuf_pool[SW_DPDK_MAX_PORT] = {0};
-
-/* Per-port statistics struct */
-struct l2fwd_port_statistics {
-	uint64_t tx;
-	uint64_t rx;
-	uint64_t dropped;
-} __rte_cache_aligned;
-struct l2fwd_port_statistics port_statistics[RTE_MAX_ETHPORTS];
 
 struct sw_dpdk_port_hw_stat{
 	uint64_t tx;
@@ -120,6 +104,335 @@ struct sw_dpdk_port_hw_stat{
 	uint64_t tx_pps_total;			//发送的所有包
 } __rte_cache_aligned;;
 struct sw_dpdk_port_hw_stat port_hw_stat[SW_DPDK_MAX_PORT] = {{0}};
+
+static int sw_dpdk_setup_port_peer(uint16_t rx_port,
+											  uint16_t tx_port,
+											  uint16_t delay_s,
+											  uint16_t rx_core,
+											  uint16_t tx_core_num,
+											  uint16_t *tx_core_map)
+{
+	int i = 0;
+	
+	if (tx_core_num > SW_DPDK_MAX_TX_NUM || 0 == tx_core_num)
+	{
+		SW_DPDK_Log_Error("tx_core_num error, %d \n", tx_core_num);
+		return -1;
+	}
+
+	if ((sw_used_port_mask & (1 << rx_port)) != 0)
+	{
+		SW_DPDK_Log_Error("rx port : %u already used ! \n", rx_port);
+		return -1;
+	}
+
+	if ((sw_used_port_mask & (1 << tx_port)) != 0)
+	{
+		SW_DPDK_Log_Error("tx port : %u already used ! \n", tx_port);
+		return -1;
+	}
+
+	if ((sw_used_core_mask & (1 << rx_core)) != 0)
+	{
+		SW_DPDK_Log_Error("rx core : %u already used ! \n", rx_core);
+		return -1;
+	}
+
+	uint16_t tx_core;
+	for (i = 0; i < tx_core_num; i++)
+	{
+		tx_core = tx_core_map[i];
+		if ((sw_used_core_mask & (1 << tx_core)) != 0)
+		{
+			SW_DPDK_Log_Error("tx core : %u already used ! \n", tx_core);
+			return -1;
+		}
+	}
+	
+	sw_port_peer[rx_port].rx_port = rx_port;
+	sw_port_peer[rx_port].tx_port = tx_port;
+	sw_port_peer[rx_port].delay_s = delay_s;
+	sw_port_peer[rx_port].rx_core = rx_core;
+	sw_port_peer[rx_port].tx_core_num = tx_core_num;
+	for (i = 0; i < tx_core_num; i++)
+		sw_port_peer[rx_port].tx_core_map[i] = tx_core_map[i];
+
+	sw_used_port_mask |= (1 << rx_port);
+	sw_used_port_mask |= (1 << tx_port);
+	sw_used_core_mask |= (1 << rx_core);
+	for (i = 0; i < tx_core_num; i++)
+	{
+		tx_core = tx_core_map[i];
+		sw_used_core_mask |= (1 << tx_core);
+	}
+
+	sw_port_mode_map[rx_port] = SW_PORT_RX;
+	sw_port_mode_map[tx_port] = SW_PORT_TX;
+
+	//设置 core
+	sw_core_conf[rx_core].core_mode = SW_CORE_RX;
+	sw_core_conf[rx_core].rx_mode_conf.rx_port = rx_port;
+	sw_core_conf[rx_core].rx_mode_conf.tx_num = tx_core_num;
+
+	sw_core_conf[tx_core].core_mode = SW_CORE_TX;
+	sw_core_conf[tx_core].tx_mode_conf.tx_port = tx_port;
+
+	sw_used_rx_port_mask |= (1 << rx_port);
+
+	SW_DPDK_Log_Info("sw_dpdk_setup_port_peer RxPort:%u TxPort:%u Delay:%u RxCore:%u TxCoreNum:%u \n",
+					rx_port, tx_port, delay_s, rx_core, tx_core_num);
+	
+	return 0;
+}
+
+static int sw_dpdk_setup_buffer(uint16_t rx_port)
+{
+	if (sw_port_mode_map[rx_port] != SW_PORT_RX)
+	{
+		SW_DPDK_Log_Error("rx port : %u not configured right ! \n", rx_port);
+		return -1;
+	}
+
+	if ((sw_used_port_mask & (1 << rx_port)) == 0)
+	{
+		SW_DPDK_Log_Error("rx port : %u not used now ! \n", rx_port);
+		return -1;
+	}
+
+	uint16_t delay = sw_port_peer[rx_port].delay_s;
+	int mbuf_num = delay * SW_DPDK_MAX_MBUF_NUM;
+	if (0 == mbuf_num)
+		mbuf_num = SW_DPDK_MAX_MBUF_NUM;
+	
+	char mbuf_name[32] = {0};
+	sprintf(mbuf_name, "mbuf_pool_%d", rx_port);
+	int socket_id = rte_eth_dev_socket_id(rx_port);
+	if (socket_id < 0)
+		socket_id = SOCKET_ID_ANY;
+	sw_port_peer[rx_port].rx_mempool = (void *)rte_pktmbuf_pool_create(mbuf_name, mbuf_num, MEMPOOL_CACHE_SIZE, 0, 
+						RTE_MBUF_DEFAULT_BUF_SIZE, socket_id);
+	if (NULL == sw_port_peer[rx_port].rx_mempool)
+	{
+		SW_DPDK_Log_Error("rx port : %u init mbuf error,mbuf num %d ! \n", rx_port, mbuf_num);
+		return -1;
+	}
+	
+	uint16_t tx_core;
+	uint16_t rx_core = sw_port_peer[rx_port].rx_core;
+	uint16_t i;
+	uint32_t ring_num = mbuf_num / sw_port_peer[rx_port].tx_core_num;
+	ring_num = rte_align32pow2(ring_num + 1);
+	for (i = 0; i < sw_port_peer[rx_port].tx_core_num; i++)
+	{
+		char ring_name[32] = {0};
+		sprintf(ring_name, "tx_ring_port%02u_%u", sw_port_peer[rx_port].tx_port, i);
+		sw_port_peer[rx_port].tx_ring[i] = rte_ring_create(ring_name, ring_num, socket_id, 0);
+		if (NULL == sw_port_peer[rx_port].tx_ring[i])
+		{
+			SW_DPDK_Log_Error("tx port : %u index %u init ring error ! \n", sw_port_peer[rx_port].tx_port, i);
+			return -1;
+		}
+
+		//设置core
+		tx_core = sw_port_peer[rx_port].tx_core_map[i];
+		sw_core_conf[rx_core].rx_mode_conf.tx_ring[i] = sw_port_peer[rx_port].tx_ring[i];
+		sw_core_conf[tx_core].tx_mode_conf.tx_queid = i;
+		sw_core_conf[tx_core].tx_mode_conf.tx_ring = sw_port_peer[rx_port].tx_ring[i];
+	}
+
+	SW_DPDK_Log_Info("Rx Port %u Setup Buffer OK !\n", rx_port);
+	return 0;
+}
+
+//must be called after eal init
+static int sw_dpdk_update_conf(uint16_t rx_portid)
+{
+	uint16_t tx_portid = sw_port_peer[rx_portid].tx_port;
+
+	memcpy(&sw_port_peer[tx_portid], &sw_port_peer[rx_portid], sizeof(SW_PORT_PEER));
+	
+	SW_DPDK_Log_Info("Update Conf, Rx-Port:%u Tx-Port:%u ok \n", rx_portid, tx_portid);
+
+	return 0;
+}
+
+
+//static int sw_dpdk_init_conf(void)
+//{
+	//uint16_t tx_core[2] = {2, 3};
+	//if (0 > sw_dpdk_setup_port_peer(0,1,3,1,2,tx_core))	
+//	uint16_t tx_core_map[1] = {2};
+//	if (0 > sw_dpdk_setup_port_peer(0,1,3,1,1,tx_core_map))
+//	{
+//		rte_exit(EXIT_FAILURE, "Invalid Port Conf\n");
+//		return -1;
+//	}
+
+//	return 0;
+//}
+
+static int sw_dpdk_init_eal(void)
+{
+	/* init EAL */
+	int ret = 0;
+	int argc = 0;
+    char argvstr[64][32] = {{0}};
+    char* argv[64] = {0};
+
+	//根据conf配置需要初始化的core
+	char core_mask[16] = {0};
+	sprintf(core_mask, "%llx", (long long unsigned int)sw_used_core_mask);
+
+	strcpy(argvstr[argc], "vswitch"); argv[argc] = argvstr[argc]; argc++;
+    strcpy(argvstr[argc], "-c"); argv[argc] = argvstr[argc]; argc++;
+    strcpy(argvstr[argc], core_mask); argv[argc] = argvstr[argc]; argc++;
+	strcpy(argvstr[argc], "--master-lcore"); argv[argc] = argvstr[argc]; argc++;
+	strcpy(argvstr[argc], "0"); argv[argc] = argvstr[argc]; argc++;
+    strcpy(argvstr[argc], "-n"); argv[argc] = argvstr[argc]; argc++;
+    strcpy(argvstr[argc], "4"); argv[argc] = argvstr[argc]; argc++;
+
+	printf("EAL:");
+	int i;
+	for (i = 0;i < argc; i++)
+		printf("%s ", argv[i]);
+	printf("\n");
+	
+	ret = rte_eal_init(argc, argv);
+	if (ret < 0)
+		rte_exit(EXIT_FAILURE, "Invalid EAL arguments\n");
+
+
+	sw_dpdk_total_port = rte_eth_dev_count();
+	if (0 == sw_dpdk_total_port)
+		rte_exit(EXIT_FAILURE, "Total port is zeor ! \n");
+	else
+		SW_DPDK_Log_Info("Total Port is %u ...\n", sw_dpdk_total_port);
+	
+	sw_dpdk_eal_init = true;
+	
+	return 0;
+}
+
+static int sw_dpdk_init_buffer(void)
+{
+	uint16_t i;
+	for (i = 0; i < SW_DPDK_MAX_PORT; i++)
+	{
+		if ((sw_used_rx_port_mask & (1 << i)) == 0)
+			continue;
+		
+		if (0 > sw_dpdk_setup_buffer(i))
+			rte_exit(EXIT_FAILURE, "Port %u setup buffer error ! \n", i);
+
+		sw_dpdk_update_conf(i);
+	}
+
+	return 0;
+}
+
+static int sw_dpdk_init_port(void)
+{
+	int ret;
+	uint16_t i,portid,tx_que_cnt;
+	struct rte_mempool *mpool;
+	
+	for (i = 0; i < SW_DPDK_MAX_PORT; i++)
+	{
+		if ((sw_used_port_mask & (1 << i)) == 0)
+			continue;
+
+		struct rte_eth_rxconf rxq_conf;
+		struct rte_eth_txconf txq_conf;
+		struct rte_eth_dev_info dev_info;
+		struct rte_eth_conf local_port_conf = sw_nic_conf;
+
+		portid = i;
+		printf("Initializing port %u... ", portid);
+		fflush(stdout);
+		
+		rte_eth_dev_info_get(portid, &dev_info);
+		if (dev_info.tx_offload_capa & DEV_TX_OFFLOAD_MBUF_FAST_FREE)
+			local_port_conf.txmode.offloads |=
+				DEV_TX_OFFLOAD_MBUF_FAST_FREE;
+		
+		rte_eth_macaddr_get(portid, &sw_ports_eth_addr[portid]);
+
+		if (sw_port_mode_map[i] == SW_PORT_RX)
+		{
+			ret = rte_eth_dev_configure(portid, 1, 0, &local_port_conf);
+			if (ret < 0)
+				rte_exit(EXIT_FAILURE, "Cannot configure device: err=%d, port=%u\n", ret, portid);
+
+			ret = rte_eth_dev_adjust_nb_rx_tx_desc(portid, &nb_rxd, &nb_txd);
+			if (ret < 0)
+				rte_exit(EXIT_FAILURE, "Cannot adjust number of descriptors: err=%d, port=%u\n", ret, portid);
+		
+			fflush(stdout);
+
+			mpool = sw_port_peer[portid].rx_mempool;
+			if (NULL == mpool)
+				rte_exit(EXIT_FAILURE, "Rx Port %u mpool null !\n", portid);
+			
+			rxq_conf = dev_info.default_rxconf;
+			rxq_conf.offloads = local_port_conf.rxmode.offloads;
+			ret = rte_eth_rx_queue_setup(portid, 0, nb_rxd,
+						     rte_eth_dev_socket_id(portid),
+						     &rxq_conf,
+						     mpool);
+			if (ret < 0)
+				rte_exit(EXIT_FAILURE, "rte_eth_rx_queue_setup:err=%d, port=%u\n", ret, portid);
+		}
+		else if (sw_port_mode_map[portid] == SW_PORT_TX)
+		{
+			tx_que_cnt = sw_port_peer[portid].tx_core_num;
+			ret = rte_eth_dev_configure(portid, 0, tx_que_cnt, &local_port_conf);
+			if (ret < 0)
+				rte_exit(EXIT_FAILURE, "Cannot configure device: err=%d, port=%u\n", ret, portid);
+
+			ret = rte_eth_dev_adjust_nb_rx_tx_desc(portid, &nb_rxd, &nb_txd);
+			if (ret < 0)
+				rte_exit(EXIT_FAILURE,
+					 "Cannot adjust number of descriptors: err=%d, port=%u\n", ret, portid);
+		
+			/* init one TX queue on each port */
+			fflush(stdout);
+			txq_conf = dev_info.default_txconf;
+			txq_conf.txq_flags = ETH_TXQ_FLAGS_IGNORE;
+			txq_conf.offloads = local_port_conf.txmode.offloads;
+
+			uint16_t j;
+			for (j = 0; j < tx_que_cnt; j++)
+			{
+				ret = rte_eth_tx_queue_setup(portid, j, nb_txd, rte_eth_dev_socket_id(portid), &txq_conf);
+				if (ret < 0)
+					rte_exit(EXIT_FAILURE, "rte_eth_tx_queue_setup:err=%d, port=%u, que=%u\n", ret, portid, j);
+			}
+		}
+
+		/* Start device */
+		ret = rte_eth_dev_start(portid);
+		if (ret < 0)
+			rte_exit(EXIT_FAILURE, "rte_eth_dev_start:err=%d, port=%u\n", ret, portid);
+
+		printf("done: \n");
+
+		rte_eth_promiscuous_enable(portid);
+
+		printf("Port %u, MAC address: %02X:%02X:%02X:%02X:%02X:%02X\n\n",
+				portid,
+				sw_ports_eth_addr[portid].addr_bytes[0],
+				sw_ports_eth_addr[portid].addr_bytes[1],
+				sw_ports_eth_addr[portid].addr_bytes[2],
+				sw_ports_eth_addr[portid].addr_bytes[3],
+				sw_ports_eth_addr[portid].addr_bytes[4],
+				sw_ports_eth_addr[portid].addr_bytes[5]);
+
+		//set port mask
+		sw_enabled_port_mask |= (1 << portid);
+	}
+
+	return 0;
+}
 
 static void sw_dpdk_calc_per_second(void)
 {
@@ -136,7 +449,7 @@ static void sw_dpdk_calc_per_second(void)
     int port_id = 0;
     for (port_id = 0; port_id < SW_DPDK_MAX_PORT; port_id++)
     {
-    	if ((sw_enabled_port_mask & (1 << port_id)) == 0)
+    	if ((sw_used_port_mask & (1 << port_id)) == 0)
     		continue;
 
     	rte_eth_stats_get(port_id, &stats);
@@ -207,39 +520,59 @@ static int sw_dpdk_kill_self(char* buf, int buf_len)
 static int sw_dpdk_port_stat(uint16_t portid, char* buf, int buf_len)
 {
 	int len = 0;
+	uint16_t i = 0;
 	if ((sw_enabled_port_mask & (1 << portid)) == 0)
 	{
 		len += snprintf(buf+len, buf_len-len, "PortID:%u is not enabled, PortMask:%d!\n", portid, sw_enabled_port_mask);
 		return len;
 	}
 
-	if (sw_port_conf[portid].portmode == MODE_RX)
+	if (sw_port_mode_map[portid] == SW_PORT_RX)
 	{
-		len += snprintf(buf+len, buf_len-len, "========Memory:\n");
-		struct rte_mempool* pmempool = NULL;
-		pmempool = pktmbuf_pool[portid];
-		if (NULL != pmempool)
-		{
-			len += snprintf(buf+len, buf_len-len, "Buff[%s]: count %d, size %d, available %u, alloc %u\n", 
-			        pmempool->name,
-			        pmempool->size,
-			        pmempool->elt_size,
-			        rte_mempool_avail_count(pmempool),
-			        rte_mempool_in_use_count(pmempool));
-		}
+		len += snprintf(buf+len, buf_len-len, "Port %u RX mode, Peer Port %u :\n", portid, sw_port_peer[portid].tx_port);
+	}
+	else if (sw_port_mode_map[portid] == SW_PORT_TX)
+	{
+		len += snprintf(buf+len, buf_len-len, "Port %u TX mode, Peer Port %u :\n", portid, sw_port_peer[portid].rx_port);
+	}
 
-		struct rte_ring* pring = NULL;
-		if (NULL != sw_port_conf[portid].rx_ring)
+	len += snprintf(buf+len, buf_len-len, "MAC address: %02X:%02X:%02X:%02X:%02X:%02X\n",
+				sw_ports_eth_addr[portid].addr_bytes[0],
+				sw_ports_eth_addr[portid].addr_bytes[1],
+				sw_ports_eth_addr[portid].addr_bytes[2],
+				sw_ports_eth_addr[portid].addr_bytes[3],
+				sw_ports_eth_addr[portid].addr_bytes[4],
+				sw_ports_eth_addr[portid].addr_bytes[5]);
+	len += snprintf(buf+len, buf_len-len, "\n");
+	
+	struct rte_mempool* pmempool = NULL;
+	pmempool = sw_port_peer[portid].rx_mempool;
+	if (NULL != pmempool)
+	{
+		len += snprintf(buf+len, buf_len-len, "  Buff[%s]: count %d, size %d, available %u, alloc %u\n", 
+		        pmempool->name,
+		        pmempool->size,
+		        pmempool->elt_size,
+		        rte_mempool_avail_count(pmempool),
+		        rte_mempool_in_use_count(pmempool));
+	}
+
+	struct rte_ring* pring = NULL;
+	for (; i < sw_port_peer[portid].tx_core_num; i++)
+	{
+		pring = sw_port_peer[portid].tx_ring[i];
+		if (NULL != pring)
 		{
-			pring = sw_port_conf[portid].rx_ring;
-			len += snprintf(buf+len, buf_len-len, "Ring[%s]: count %d, available %u, alloc %u\n", 
+			len += snprintf(buf+len, buf_len-len, "  Ring[%s]: count %d, available %u, alloc %u\n", 
 			        pring->name,
 			        pring->size,
 			        rte_ring_free_count(pring),
 			        rte_ring_count(pring));
 		}		
-	}
+	}	
 
+	len += snprintf(buf+len, buf_len-len, "\n");
+	
 	struct rte_eth_stats stats;
 	rte_eth_stats_get(portid, &stats);
 
@@ -258,6 +591,8 @@ static int sw_dpdk_port_stat(uint16_t portid, char* buf, int buf_len)
 	
 	return len;
 }
+
+/**************************************************************/
 
 static void
 sw_dpdk_tx_pkts(uint16_t port_id, uint16_t queue_id,
@@ -285,43 +620,52 @@ sw_dpdk_main_loop(void)
 	int ret;
 	unsigned lcore_id;
 	unsigned i, nb_rx;
+	uint16_t rx_port, tx_port, tx_num, delay, hash_id;
+	struct rte_ring* rx_push_ring[SW_DPDK_MAX_TX_NUM] = {0};
+	struct rte_ring* tx_ring = NULL;
 	uint64_t timeout_tsc, cur_tsc;
-	struct sw_port_conf *qconf;
 	uint64_t timer_1s_hz = rte_get_timer_hz();
-
+	SW_CORE_CONF *core_conf = NULL;
+	uint16_t tx_queid = 0;
+	uint16_t rx_mode = 0;
+	uint16_t tx_mode = 0;
+		
 	lcore_id = rte_lcore_id();
-	if (0 == lcore_id)
-		return ;
-	
-	for (i = 0 ; i < SW_DPDK_MAX_PORT; i++)
-	{
-		if (sw_port_conf[i].coreid == lcore_id)
-		{
-			qconf = &sw_port_conf[i];
-			break;
-		}
-	}
-
-	if (i >= SW_DPDK_MAX_PORT)
+	if ((sw_used_core_mask & (1 << lcore_id)) == 0 || 0 == lcore_id)
 	{
 		RTE_LOG(INFO, VSWITCH, "lcore %u has nothing to do \n", lcore_id);
 		return;
 	}
 
-	uint16_t portid = i;
-	int delay = qconf->delay_s;
-	int rx_mode = qconf->portmode & MODE_RX;
-	int tx_mode = qconf->portmode & MODE_TX;
-	struct rte_ring* rx_ring = qconf->rx_ring;
-	struct rte_ring* tx_ring = qconf->tx_ring;
-	
-	if (rx_mode && tx_mode) {
-		RTE_LOG(INFO, VSWITCH, "lcore %u has nothing to do, portid:%d \n", \
-				lcore_id, portid);
+	core_conf = &sw_core_conf[lcore_id];
+	SW_CORE_MODE core_mode = core_conf->core_mode;
+
+	if (core_mode == SW_CORE_RX)
+	{
+		rx_port = core_conf->rx_mode_conf.rx_port;
+		tx_num = core_conf->rx_mode_conf.tx_num;
+		for (i = 0; i < tx_num; i++)
+			rx_push_ring[i] = (struct rte_ring*)core_conf->rx_mode_conf.tx_ring[i];
+
+		delay = sw_port_peer[rx_port].delay_s;
+		rx_mode = 1;
+	}
+	else if (core_mode == SW_CORE_TX)
+	{
+		tx_port = core_conf->tx_mode_conf.tx_port;
+		tx_queid = core_conf->tx_mode_conf.tx_queid;
+		tx_ring = core_conf->tx_mode_conf.tx_ring;
+		delay = sw_port_peer[tx_port].delay_s;
+		tx_mode = 1;
+	}
+	else
+	{
+		SW_DPDK_Log_Error("Core %u Mode error %d ...\n", lcore_id, core_mode);
 		return;
 	}
+	
 
-	RTE_LOG(INFO, VSWITCH, "entering main loop on lcore %u, rxmode:%d, txmode:%d\n", lcore_id, rx_mode, tx_mode);
+	SW_DPDK_Log_Info("entering main loop on lcore %u, mode:%d \n", lcore_id, core_mode);
 
 	while (!force_quit) {
 
@@ -329,7 +673,7 @@ sw_dpdk_main_loop(void)
 
 		if (rx_mode)
 		{
-			nb_rx = rte_eth_rx_burst(portid, 0, pkts_burst, MAX_PKT_BURST);
+			nb_rx = rte_eth_rx_burst(rx_port, 0, pkts_burst, MAX_PKT_BURST);
 			if (nb_rx <= 0) 
 				continue;
 
@@ -340,17 +684,13 @@ sw_dpdk_main_loop(void)
 				m = pkts_burst[i];
 				m->timestamp = timeout_tsc;
 				//printf("Time:%18"PRIu64"Recv A pkt,timeout:%18"PRIu64"\n", cur_tsc, m->timestamp);
-			}
-			
-			port_statistics[portid].rx += nb_rx;
-			ret = rte_ring_enqueue_bulk(rx_ring, (void **)pkts_burst, nb_rx, NULL);
-			if (0 == ret)
-			{
-				for (i = 0; i < nb_rx; i++)
-					rte_pktmbuf_free(pkts_burst[i]);
-
-				port_statistics[portid].dropped += nb_rx;
-			} 			
+				hash_id = m->hash.rss % tx_num;
+				if (0 != rte_ring_enqueue(rx_push_ring[hash_id], (void*)m))
+				{
+					rte_pktmbuf_free(m);
+					//增加统计
+				}
+			}			
 		}
 		
 		if (tx_mode)
@@ -367,8 +707,7 @@ sw_dpdk_main_loop(void)
 					if (cur_tsc >= m->timestamp)
 					{
 						//printf("Time:%18"PRIu64"Forward A pkt,timeout:%18"PRIu64"\n", cur_tsc,m->timestamp);
-						sw_dpdk_tx_pkts(portid, 0, &m, 1);
-						port_statistics[portid].tx += 1;
+						sw_dpdk_tx_pkts(tx_port, tx_queid, &m, 1);
 						break;
 					}
 					else
@@ -459,176 +798,69 @@ sw_dpdk_signal_handler(int signum)
 	}
 }
 
-int sw_dpdk_init(void)
+int sw_dpdk_init(char* conf_path)
 {
-	int ret;
-	uint16_t nb_ports;
-	uint16_t portid;
-	unsigned lcore_id;
-	unsigned int nb_mbufs;
+	int ret,i;
+	unsigned lcore_id, portid;
 
 	//signal
 	force_quit = false;
 	signal(SIGINT, sw_dpdk_signal_handler);
 	signal(SIGTERM, sw_dpdk_signal_handler);
 
-	/* init EAL */
-	int argc = 0;
-    char argvstr[64][32] = {{0}};
-    char* argv[64] = {0};
+	//初始化命令行
+	sw_command_register_kill_self(sw_dpdk_kill_self);
+	sw_command_register_show_port(sw_dpdk_port_stat);
+	sw_command_init(CMD_ROLE_SERVER);
 
-	strcpy(argvstr[argc], "vswitch"); argv[argc] = argvstr[argc]; argc++;
-    strcpy(argvstr[argc], "-l"); argv[argc] = argvstr[argc]; argc++;
-    strcpy(argvstr[argc], "1-2"); argv[argc] = argvstr[argc]; argc++;
-    strcpy(argvstr[argc], "-n"); argv[argc] = argvstr[argc]; argc++;
-    strcpy(argvstr[argc], "4"); argv[argc] = argvstr[argc]; argc++;
-	//strcpy(argvstr[argc], "--master-lcore"); argv[argc] = argvstr[argc]; argc++;
-	//strcpy(argvstr[argc], "0"); argv[argc] = argvstr[argc]; argc++;
-	
-	ret = rte_eal_init(argc, argv);
-	if (ret < 0)
-		rte_exit(EXIT_FAILURE, "Invalid EAL arguments\n");
+	//1)初始化配置
+	//2)根据配置初始化DPDK eal
+	//3)获得port,再调用dpdk接口获取port所在的numa,更新conf,根据conf初始化内存
+	//4)初始化各个port
+	//5)开始main loop
 
-	nb_ports = rte_eth_dev_count();
-
-	//just for 2 ports @20180408
-	if (nb_ports == 0)
-		rte_exit(EXIT_FAILURE, "No Ethernet ports - bye\n");
-	else if (nb_ports != 2)
-		rte_exit(EXIT_FAILURE, "Ethernet ports Not 2 - bye\n");
-	
-	sw_port_conf[0].portmode = MODE_RX;
-	sw_port_conf[0].coreid = 1;
-	sw_port_conf[0].delay_s = 5;
-
-	sw_port_conf[1].portmode = MODE_TX;
-	sw_port_conf[1].coreid = 2;
-	sw_port_conf[1].delay_s = 5;
-
-	nb_mbufs = SW_DPDK_MAX_MBUF_NUM;
-
-	for (portid = 0; portid < nb_ports; portid++)
+	// step 1
+	SW_PORT_PEER tmp_conf[SW_DPDK_MAX_PORT] = {{0}};
+	if (0 > sw_config_init(conf_path, (void *)tmp_conf))
 	{
-		if (sw_port_conf[portid].portmode == MODE_RX)
+		SW_DPDK_Log_Error("Init Conf:%s error\n", conf_path);
+		return -1;
+	}
+	else
+	{
+		for (i = 0; i < SW_DPDK_MAX_PORT; i++)
 		{
-			char mbuf_name[32] = {0};
-			sprintf(mbuf_name, "mbuf_pool_%d", portid);
-			pktmbuf_pool[portid] = rte_pktmbuf_pool_create(mbuf_name, nb_mbufs, MEMPOOL_CACHE_SIZE, 0, 
-						RTE_MBUF_DEFAULT_BUF_SIZE, rte_socket_id());
+			if (!tmp_conf[i].init)
+				continue;
 
-			if (pktmbuf_pool[portid] == NULL)
-				rte_exit(EXIT_FAILURE, "Cannot init mbuf pool, portid = %d\n", portid);
+			ret = sw_dpdk_setup_port_peer(tmp_conf[i].rx_port, tmp_conf[i].tx_port,
+									tmp_conf[i].delay_s,tmp_conf[i].rx_core, 
+									tmp_conf[i].tx_core_num, tmp_conf[i].tx_core_map);
+			if (0 > ret)
+			{
+				SW_DPDK_Log_Error("Setup Port %u peer error\n", i);
+				return -1;
+			}
+		}
 
-			char rx_ring_name[32] = {0};
-			sprintf(rx_ring_name, "rx_ring_%d", portid);
-			sw_port_conf[portid].rx_ring = rte_ring_create(rx_ring_name, nb_mbufs, rte_socket_id(), 0);
-			if (NULL == sw_port_conf[portid].rx_ring)
-				rte_exit(EXIT_FAILURE, "Cannot init rx_ring, portid = %d\n", portid);
-			
-			printf("PortId:%d Rx mode, init buf ok!\n", portid);
+		if (sw_used_port_mask == 0)
+		{
+			SW_DPDK_Log_Error("Wrong Conf ... \n");
+			return -1;
 		}
 	}
 
-	sw_port_conf[1].tx_ring = sw_port_conf[0].rx_ring;
-	
-	/* Initialise each port */
-	for (portid = 0; portid < nb_ports; portid++) {
-		struct rte_eth_rxconf rxq_conf;
-		struct rte_eth_txconf txq_conf;
-		struct rte_eth_conf local_port_conf = port_conf;
-		struct rte_eth_dev_info dev_info;
+	// step 2
+	sw_dpdk_init_eal();
 
-		/* init port */
-		printf("Initializing port %u... ", portid);
-		fflush(stdout);
-		rte_eth_dev_info_get(portid, &dev_info);
-		if (dev_info.tx_offload_capa & DEV_TX_OFFLOAD_MBUF_FAST_FREE)
-			local_port_conf.txmode.offloads |=
-				DEV_TX_OFFLOAD_MBUF_FAST_FREE;
+	// step 3
+	sw_dpdk_init_buffer();
 		
-		rte_eth_macaddr_get(portid, &sw_ports_eth_addr[portid]);
+	// step 4
+	sw_dpdk_init_port();
 
-		/* init one RX queue */
-		if (sw_port_conf[portid].portmode == MODE_RX)
-		{
-			ret = rte_eth_dev_configure(portid, 1, 0, &local_port_conf);
-			if (ret < 0)
-				rte_exit(EXIT_FAILURE, "Cannot configure device: err=%d, port=%u\n",
-					  ret, portid);
-
-			ret = rte_eth_dev_adjust_nb_rx_tx_desc(portid, &nb_rxd,
-							       &nb_txd);
-			if (ret < 0)
-				rte_exit(EXIT_FAILURE,
-					 "Cannot adjust number of descriptors: err=%d, port=%u\n",
-					 ret, portid);
-		
-			fflush(stdout);
-			rxq_conf = dev_info.default_rxconf;
-			rxq_conf.offloads = local_port_conf.rxmode.offloads;
-			ret = rte_eth_rx_queue_setup(portid, 0, nb_rxd,
-						     rte_eth_dev_socket_id(portid),
-						     &rxq_conf,
-						     pktmbuf_pool[portid]);
-			if (ret < 0)
-				rte_exit(EXIT_FAILURE, "rte_eth_rx_queue_setup:err=%d, port=%u\n",
-					  ret, portid);
-		}
-
-		if (sw_port_conf[portid].portmode == MODE_TX)
-		{
-			ret = rte_eth_dev_configure(portid, 0, 1, &local_port_conf);
-			if (ret < 0)
-				rte_exit(EXIT_FAILURE, "Cannot configure device: err=%d, port=%u\n",
-					  ret, portid);
-
-			ret = rte_eth_dev_adjust_nb_rx_tx_desc(portid, &nb_rxd,
-							       &nb_txd);
-			if (ret < 0)
-				rte_exit(EXIT_FAILURE,
-					 "Cannot adjust number of descriptors: err=%d, port=%u\n",
-					 ret, portid);
-		
-			/* init one TX queue on each port */
-			fflush(stdout);
-			txq_conf = dev_info.default_txconf;
-			txq_conf.txq_flags = ETH_TXQ_FLAGS_IGNORE;
-			txq_conf.offloads = local_port_conf.txmode.offloads;
-			ret = rte_eth_tx_queue_setup(portid, 0, nb_txd,
-					rte_eth_dev_socket_id(portid),
-					&txq_conf);
-			if (ret < 0)
-				rte_exit(EXIT_FAILURE, "rte_eth_tx_queue_setup:err=%d, port=%u\n",
-					ret, portid);
-		}
-		
-		/* Start device */
-		ret = rte_eth_dev_start(portid);
-		if (ret < 0)
-			rte_exit(EXIT_FAILURE, "rte_eth_dev_start:err=%d, port=%u\n",
-				  ret, portid);
-
-		printf("done: \n");
-
-		rte_eth_promiscuous_enable(portid);
-
-		printf("Port %u, MAC address: %02X:%02X:%02X:%02X:%02X:%02X\n\n",
-				portid,
-				sw_ports_eth_addr[portid].addr_bytes[0],
-				sw_ports_eth_addr[portid].addr_bytes[1],
-				sw_ports_eth_addr[portid].addr_bytes[2],
-				sw_ports_eth_addr[portid].addr_bytes[3],
-				sw_ports_eth_addr[portid].addr_bytes[4],
-				sw_ports_eth_addr[portid].addr_bytes[5]);
-
-		/* initialize port stats */
-		memset(&port_statistics[portid], 0, sizeof(port_statistics[portid]));
-
-		//set port mask
-		sw_enabled_port_mask |= (1 << portid);
-	}
-
-	sw_dpdk_check_all_ports_link_status(nb_ports, sw_enabled_port_mask);
+	// check all the links 
+	sw_dpdk_check_all_ports_link_status(sw_dpdk_total_port, sw_enabled_port_mask);
 
 	//初始化统计线程
 	pthread_t threadid;
@@ -637,11 +869,6 @@ int sw_dpdk_init(void)
 		printf("create sw_dpdk_calc_statistic_thread error!\n");
 		return -1;
 	}
-
-	//初始化命令行
-	sw_command_register_kill_self(sw_dpdk_kill_self);
-	sw_command_register_show_port(sw_dpdk_port_stat);
-	sw_command_init(CMD_ROLE_SERVER);
 
 	//wait 
 	ret = 0;
@@ -655,7 +882,7 @@ int sw_dpdk_init(void)
 		}
 	}
 
-	for (portid = 0; portid < nb_ports; portid++) {
+	for (portid = 0; portid < sw_dpdk_total_port; portid++) {
 		if ((sw_enabled_port_mask & (1 << portid)) == 0)
 			continue;
 		printf("Closing port %d...", portid);

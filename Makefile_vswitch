@@ -14,6 +14,7 @@ endif
 SRCS-y := src/sw_main.c 
 SRCS-y += src/sw_dpdk.c 
 SRCS-y += src/sw_command.c
+SRCS-y += src/sw_config.c
 
 RTE_SDK=/usr/local/dpdk/share/dpdk/
 

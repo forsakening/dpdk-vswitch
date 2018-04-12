@@ -6,12 +6,17 @@
 //#include "sw_log.h"
 #include "sw_dpdk.h"
 
-int main(void)
+int main(int argc, char ** argv)
 {
 	int ret = 0;
+	if (2 != argc)
+	{
+		printf("Usage:%s conf_path ...\n", argv[0]);
+		return -1;
+	}
 
 	//≥ı ºªØdpdk
-	ret = sw_dpdk_init();
+	ret = sw_dpdk_init(argv[1]);
 	if (ret < 0)
 	{
 		//sw_log(SW_LOG_ERROR, "sw_dpdk_init error, ret=%d!", ret);
