@@ -13,11 +13,11 @@ static int sw_config_parse_tx_core_map(char* fmt, int* core_map)
 		return -1;
 
 	char trim[32] = {0};
-	memcpy(trim, &fmt[1], strlen(fmt)-1);
+	memcpy(trim, &fmt[1], strlen(fmt)-2);
 	int i = 0;
-	char* token = strtok(trim, " ");
-	do
-    {
+	char* token = strtok(trim, SW_TX_MAP_SPLIT);
+	while(token)
+	{
 		core_map[i] = atoi(token);
 		if (core_map[i] < 0 || core_map[i] >= SW_DPDK_MAX_CORE)
 			return -1;
@@ -25,8 +25,8 @@ static int sw_config_parse_tx_core_map(char* fmt, int* core_map)
 		i++;
 		if (i > SW_DPDK_MAX_TX_NUM) return -1;
 		
-        token = strtok( NULL, ",");
-    }while( token != NULL );
+        token = strtok(NULL, SW_TX_MAP_SPLIT);
+    }
 
 	if (i == 0)
 		return -1;

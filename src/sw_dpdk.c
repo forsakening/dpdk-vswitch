@@ -91,6 +91,19 @@ static struct rte_eth_conf sw_nic_conf = {
 	},
 };
 
+struct sw_dpdk_port_sw_stat{
+	//rx
+	uint64_t drop_by_no_ring[SW_DPDK_MAX_TX_NUM];
+	uint64_t enque_ring[SW_DPDK_MAX_TX_NUM];
+
+	//tx
+	uint64_t drop_by_not_parsed[SW_DPDK_MAX_TX_NUM];
+	uint64_t drop_by_filtered[SW_DPDK_MAX_TX_NUM];
+	uint64_t deque_ring[SW_DPDK_MAX_TX_NUM];
+	uint64_t send_ring[SW_DPDK_MAX_TX_NUM];
+} __rte_cache_aligned;
+struct sw_dpdk_port_sw_stat port_sw_stat[SW_DPDK_MAX_PORT];
+
 struct sw_dpdk_port_hw_stat{
 	uint64_t tx;
 	uint64_t rx;
@@ -102,7 +115,7 @@ struct sw_dpdk_port_hw_stat{
 	uint64_t rx_pps_total;			//收到的所有包，包括错误报的pps
 	uint64_t rx_pps_total_average;	//平均值
 	uint64_t tx_pps_total;			//发送的所有包
-} __rte_cache_aligned;;
+} __rte_cache_aligned;
 struct sw_dpdk_port_hw_stat port_hw_stat[SW_DPDK_MAX_PORT] = {{0}};
 
 static int sw_dpdk_setup_port_peer(uint16_t rx_port,
@@ -174,9 +187,13 @@ static int sw_dpdk_setup_port_peer(uint16_t rx_port,
 	sw_core_conf[rx_core].rx_mode_conf.rx_port = rx_port;
 	sw_core_conf[rx_core].rx_mode_conf.tx_num = tx_core_num;
 
-	sw_core_conf[tx_core].core_mode = SW_CORE_TX;
-	sw_core_conf[tx_core].tx_mode_conf.tx_port = tx_port;
-
+	for (i = 0; i < tx_core_num; i++)
+	{
+		tx_core = tx_core_map[i];
+		sw_core_conf[tx_core].core_mode = SW_CORE_TX;
+		sw_core_conf[tx_core].tx_mode_conf.tx_port = tx_port;
+	}
+	
 	sw_used_rx_port_mask |= (1 << rx_port);
 
 	SW_DPDK_Log_Info("sw_dpdk_setup_port_peer RxPort:%u TxPort:%u Delay:%u RxCore:%u TxCoreNum:%u \n",
@@ -296,7 +313,8 @@ static int sw_dpdk_init_eal(void)
 	for (i = 0;i < argc; i++)
 		printf("%s ", argv[i]);
 	printf("\n");
-	
+
+	//rte_log_set_level(RTE_LOGTYPE_EAL,RTE_LOG_DEBUG);
 	ret = rte_eal_init(argc, argv);
 	if (ret < 0)
 		rte_exit(EXIT_FAILURE, "Invalid EAL arguments\n");
@@ -507,6 +525,28 @@ static void* sw_dpdk_calc_statistic_thread(void* parg)
     return NULL;
 }
 
+static int sw_dpdk_core_map(char* buf, int buf_len)
+{
+	int len = 0;
+	len += snprintf(buf+len, buf_len-len,"\n");
+	uint16_t i;
+	for (i = 0; i < SW_DPDK_MAX_CORE; i++)
+	{
+		if ((sw_used_core_mask & ((uint64_t)1<<i)) == 0)
+			continue;
+
+		if (sw_core_conf[i].core_mode == SW_CORE_RX)
+			len += snprintf(buf+len, buf_len-len,"  Core:%02u  RX Mode\n", i);
+		else if (sw_core_conf[i].core_mode == SW_CORE_TX)
+			len += snprintf(buf+len, buf_len-len,"  Core:%02u  TX Mode\n", i);
+		else
+			len += snprintf(buf+len, buf_len-len,"  Core:%02u  No Mode\n", i);
+	}
+	
+	return len;
+}
+
+
 static int sw_dpdk_kill_self(char* buf, int buf_len)
 {
 	int len = 0;
@@ -543,7 +583,8 @@ static int sw_dpdk_port_stat(uint16_t portid, char* buf, int buf_len)
 				sw_ports_eth_addr[portid].addr_bytes[3],
 				sw_ports_eth_addr[portid].addr_bytes[4],
 				sw_ports_eth_addr[portid].addr_bytes[5]);
-	len += snprintf(buf+len, buf_len-len, "\n");
+	
+	len += snprintf(buf+len, buf_len-len, "\nHardWare Stat:\n\n");
 	
 	struct rte_mempool* pmempool = NULL;
 	pmempool = sw_port_peer[portid].rx_mempool;
@@ -588,11 +629,45 @@ static int sw_dpdk_port_stat(uint16_t portid, char* buf, int buf_len)
 	len += snprintf(buf+len, buf_len-len, "  RX-bps:	  %-12"PRIu64" TX-bps:	  %-12"PRIu64"\n",port_hw_stat[portid].rx_bps,port_hw_stat[portid].tx_bps);
 	len += snprintf(buf+len, buf_len-len, "  RX-pps-total:	  %-12"PRIu64" TX-pps-total:	  %-12"PRIu64"\n",\
                 port_hw_stat[portid].rx_pps_total, port_hw_stat[portid].tx_pps_total);
+
+	
+	len += snprintf(buf+len, buf_len-len, "\nSoftWare Stat:\n\n");
+	uint16_t tx_num;
+	if (sw_port_mode_map[portid] == SW_PORT_RX)
+	{
+		tx_num = sw_port_peer[portid].tx_core_num;
+		for (i = 0; i < tx_num; i++)
+		{
+			len += snprintf(buf+len, buf_len-len, "  [Ring%u]Enque-Ring:  %-12"PRIu64 "  Drop-Ring:  %-12"PRIu64"\n", 
+							i, port_sw_stat[portid].enque_ring[i], port_sw_stat[portid].drop_by_no_ring[i]);
+		}
+	}
+	else if (sw_port_mode_map[portid] == SW_PORT_TX)
+	{
+		tx_num = sw_port_peer[portid].tx_core_num;
+		for (i = 0; i < tx_num; i++)
+		{
+			len += snprintf(buf+len, buf_len-len, "  [Ring%u]Deque-Ring:  %-12"PRIu64 "  Send-Ring:  %-12"PRIu64 "  Drop-Parse:  %-12"PRIu64 "Drop-Filter:  %-12"PRIu64"\n", 
+							i, port_sw_stat[portid].deque_ring[i], port_sw_stat[portid].send_ring[i],
+							port_sw_stat[portid].drop_by_not_parsed[i], port_sw_stat[portid].drop_by_filtered[i]);
+			//len += snprintf(buf+len, buf_len-len, "  [Ring%u]Send-Ring:  %-12"PRIu64"\n", i, port_sw_stat[portid].send_ring[i]);
+			//len += snprintf(buf+len, buf_len-len, "  [Ring%u]Drop-Parse:  %-12"PRIu64"\n", i, port_sw_stat[portid].drop_by_not_parsed[i]);
+			//len += snprintf(buf+len, buf_len-len, "  [Ring%u]Drop-Filter:  %-12"PRIu64"\n", i, port_sw_stat[portid].drop_by_filtered[i]);
+		}
+	}
 	
 	return len;
 }
 
 /**************************************************************/
+static int sw_dpdk_filter_pkt(struct rte_mbuf* m)
+{
+	if (NULL == m)
+		return -1;
+
+	
+	return 0;
+}
 
 static void
 sw_dpdk_tx_pkts(uint16_t port_id, uint16_t queue_id,
@@ -688,8 +763,10 @@ sw_dpdk_main_loop(void)
 				if (0 != rte_ring_enqueue(rx_push_ring[hash_id], (void*)m))
 				{
 					rte_pktmbuf_free(m);
-					//增加统计
+					port_sw_stat[rx_port].drop_by_no_ring[hash_id]++;
 				}
+
+				port_sw_stat[rx_port].enque_ring[hash_id]++;
 			}			
 		}
 		
@@ -702,6 +779,15 @@ sw_dpdk_main_loop(void)
 			}
 			else
 			{
+				port_sw_stat[tx_port].deque_ring[tx_queid]++;
+			
+				//对报文进行分析
+				if (0 > sw_dpdk_filter_pkt(m))
+				{
+					port_sw_stat[tx_port].drop_by_filtered[tx_queid]++;
+					rte_pktmbuf_free(m);
+				}
+			
 				do
 				{
 					if (cur_tsc >= m->timestamp)
@@ -717,6 +803,8 @@ sw_dpdk_main_loop(void)
 						cur_tsc = rte_rdtsc();
 					}
 				}while (1);
+
+				port_sw_stat[tx_port].send_ring[tx_queid]++;
 			}
 		}
 	}
@@ -809,6 +897,7 @@ int sw_dpdk_init(char* conf_path)
 	signal(SIGTERM, sw_dpdk_signal_handler);
 
 	//初始化命令行
+	sw_command_register_show_core_mode(sw_dpdk_core_map);
 	sw_command_register_kill_self(sw_dpdk_kill_self);
 	sw_command_register_show_port(sw_dpdk_port_stat);
 	sw_command_init(CMD_ROLE_SERVER);
@@ -861,6 +950,8 @@ int sw_dpdk_init(char* conf_path)
 
 	// check all the links 
 	sw_dpdk_check_all_ports_link_status(sw_dpdk_total_port, sw_enabled_port_mask);
+
+	memset(port_sw_stat, 0, sizeof(port_sw_stat));
 
 	//初始化统计线程
 	pthread_t threadid;

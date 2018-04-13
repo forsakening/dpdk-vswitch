@@ -193,12 +193,63 @@ cmdline_parse_inst_t cmd_kill_self = {
 };
 
 
+/* show core mode stats */
+struct cmd_show_core_mode_result {
+	cmdline_fixed_string_t show;
+	cmdline_fixed_string_t core;
+	cmdline_fixed_string_t mode;
+};
+
+cmdline_parse_token_string_t cmd_show_core_mode_show =
+	TOKEN_STRING_INITIALIZER
+		(struct cmd_show_core_mode_result,
+		 show, "show");
+cmdline_parse_token_string_t cmd_show_core_mode_core =
+	TOKEN_STRING_INITIALIZER
+		(struct cmd_show_core_mode_result,
+		 core, "core");
+cmdline_parse_token_string_t cmd_show_core_mode_mode =
+	TOKEN_STRING_INITIALIZER
+		(struct cmd_show_core_mode_result,
+		 mode, "mode");
+
+static void
+cmd_show_core_mode_parsed(
+	void *parsed_result,
+	__attribute__((unused)) struct cmdline *cl,
+	__attribute__((unused)) void *data)
+{
+	struct cmd_show_core_mode_result* res = parsed_result;
+
+	int len = 0;
+	char buf[SW_CMD_BUFF_LEN] = {0};
+	sw_command_client_send_and_recv(SW_CMD_TYPE_SHOW_CORE_MODE, res, 
+									sizeof(struct cmd_show_core_mode_result), 
+									buf, SW_CMD_BUFF_LEN, &len, 3);
+
+	printf("%s\n", buf);
+}
+
+cmdline_parse_inst_t cmd_show_core_mode = {
+	.f = cmd_show_core_mode_parsed,
+	.data = NULL,
+	.help_str = "show core mode",
+	.tokens = {
+		(void *)&cmd_show_core_mode_show,
+		(void *)&cmd_show_core_mode_core,
+		(void *)&cmd_show_core_mode_mode,
+		NULL,
+	},
+};
+
+
 /****************/
 
 cmdline_parse_ctx_t vswitch_ctx[] = {
 	(cmdline_parse_inst_t *)&cmd_quit,
 	(cmdline_parse_inst_t *)&cmd_kill_self,	
 	(cmdline_parse_inst_t *)&cmd_show_port_stats,
+	(cmdline_parse_inst_t *)&cmd_show_core_mode,
 	NULL,
 };
 
@@ -221,6 +272,7 @@ typedef struct
 
 typedef struct
 {	
+	SW_CMD_SHOW_CORE_MODE show_core_mode;
 	SW_CMD_SHOW_PORT show_port;
 	SW_KILL_SELF kill_self;
 }SW_CMD_FUNC_MAP;
@@ -332,6 +384,15 @@ int sw_command_init(SW_CMD_ROLE role)
 	return 0;
 }
 
+
+int sw_command_register_show_core_mode(SW_CMD_SHOW_CORE_MODE func)
+{
+	if (sw_cmd_func_map.show_core_mode != NULL)
+		return -1;
+
+	sw_cmd_func_map.show_core_mode = func;
+	return 0;
+}
 
 int sw_command_register_show_port(SW_CMD_SHOW_PORT func)
 {
@@ -468,6 +529,11 @@ void sw_command_server_handle(int fd)
 		{
 			if (NULL != sw_cmd_func_map.kill_self)
 				resp_len = sw_cmd_func_map.kill_self(resp_buf, SW_CMD_BUFF_LEN);
+		}
+		else if (SW_CMD_TYPE_SHOW_CORE_MODE == ntohl(cmd_req->cmd_type))
+		{
+			if (NULL != sw_cmd_func_map.show_core_mode)
+				resp_len = sw_cmd_func_map.show_core_mode(resp_buf, SW_CMD_BUFF_LEN);
 		}
 
 		int send_len = resp_len + sizeof(SW_CMD_RESPONSE);

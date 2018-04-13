@@ -17,8 +17,13 @@ typedef enum
 {
 	SW_CMD_TYPE_SHOW_PORT = 0,
 	SW_CMD_TYPE_KILL_SELF,
+	SW_CMD_TYPE_SHOW_CORE_MODE,
 }SW_CMD_TYPE;
 
+
+//注册展示core模式接口
+typedef int (* SW_CMD_SHOW_CORE_MODE)(char*, int);
+int sw_command_register_show_core_mode(SW_CMD_SHOW_CORE_MODE);
 
 //注册展示端口统计接口
 typedef int (* SW_CMD_SHOW_PORT)(uint16_t, char*, int);
