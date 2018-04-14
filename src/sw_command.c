@@ -130,7 +130,7 @@ cmd_show_port_stats_parsed(
 	char buf[SW_CMD_BUFF_LEN] = {0};
 	sw_command_client_send_and_recv(SW_CMD_TYPE_SHOW_PORT, res, 
 									sizeof(struct cmd_show_port_stats_result), 
-									buf, SW_CMD_BUFF_LEN, &len, 3);
+									buf, SW_CMD_BUFF_LEN, &len, SW_CMD_TIMEOUT);
 
 	printf("%s\n", buf);
 	
@@ -225,7 +225,7 @@ cmd_show_core_mode_parsed(
 	char buf[SW_CMD_BUFF_LEN] = {0};
 	sw_command_client_send_and_recv(SW_CMD_TYPE_SHOW_CORE_MODE, res, 
 									sizeof(struct cmd_show_core_mode_result), 
-									buf, SW_CMD_BUFF_LEN, &len, 3);
+									buf, SW_CMD_BUFF_LEN, &len, SW_CMD_TIMEOUT);
 
 	printf("%s\n", buf);
 }
@@ -246,6 +246,7 @@ cmdline_parse_inst_t cmd_show_core_mode = {
 /****************/
 
 cmdline_parse_ctx_t vswitch_ctx[] = {
+	(cmdline_parse_inst_t *)&cmd_clear_history,
 	(cmdline_parse_inst_t *)&cmd_quit,
 	(cmdline_parse_inst_t *)&cmd_kill_self,	
 	(cmdline_parse_inst_t *)&cmd_show_port_stats,

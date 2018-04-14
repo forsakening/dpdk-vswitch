@@ -1,5 +1,6 @@
 //@20180408 by Shawn.Z v1.0 just for test 2 ports
 //@20180411 by Shawn.Z v1.1 support configuration
+//@20180413 by Shawn.Z v1.2 support packet parse
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -42,6 +43,7 @@
 #include "sw_dpdk.h"
 #include "sw_command.h"
 #include "sw_config.h"
+#include "sw_parse.h"
 
 #define RTE_LOGTYPE_VSWITCH RTE_LOGTYPE_USER1
 
@@ -97,10 +99,17 @@ struct sw_dpdk_port_sw_stat{
 	uint64_t enque_ring[SW_DPDK_MAX_TX_NUM];
 
 	//tx
-	uint64_t drop_by_not_parsed[SW_DPDK_MAX_TX_NUM];
+	uint64_t drop_by_parsed[SW_DPDK_MAX_TX_NUM];
 	uint64_t drop_by_filtered[SW_DPDK_MAX_TX_NUM];
 	uint64_t deque_ring[SW_DPDK_MAX_TX_NUM];
 	uint64_t send_ring[SW_DPDK_MAX_TX_NUM];
+
+	//tx - stat
+	uint64_t vlan_pkts[SW_DPDK_MAX_TX_NUM];
+	uint64_t mpls_pkts[SW_DPDK_MAX_TX_NUM];
+	uint64_t ipv4_pkts[SW_DPDK_MAX_TX_NUM];
+	uint64_t tcp_pkts[SW_DPDK_MAX_TX_NUM];
+	uint64_t udp_pkts[SW_DPDK_MAX_TX_NUM];
 } __rte_cache_aligned;
 struct sw_dpdk_port_sw_stat port_sw_stat[SW_DPDK_MAX_PORT];
 
@@ -145,7 +154,7 @@ static int sw_dpdk_setup_port_peer(uint16_t rx_port,
 		return -1;
 	}
 
-	if ((sw_used_core_mask & (1 << rx_core)) != 0)
+	if ((sw_used_core_mask & ((uint64_t)1 << rx_core)) != 0)
 	{
 		SW_DPDK_Log_Error("rx core : %u already used ! \n", rx_core);
 		return -1;
@@ -155,7 +164,7 @@ static int sw_dpdk_setup_port_peer(uint16_t rx_port,
 	for (i = 0; i < tx_core_num; i++)
 	{
 		tx_core = tx_core_map[i];
-		if ((sw_used_core_mask & (1 << tx_core)) != 0)
+		if ((sw_used_core_mask & ((uint64_t)1 << tx_core)) != 0)
 		{
 			SW_DPDK_Log_Error("tx core : %u already used ! \n", tx_core);
 			return -1;
@@ -172,11 +181,11 @@ static int sw_dpdk_setup_port_peer(uint16_t rx_port,
 
 	sw_used_port_mask |= (1 << rx_port);
 	sw_used_port_mask |= (1 << tx_port);
-	sw_used_core_mask |= (1 << rx_core);
+	sw_used_core_mask |= ((uint64_t)1 << rx_core);
 	for (i = 0; i < tx_core_num; i++)
 	{
 		tx_core = tx_core_map[i];
-		sw_used_core_mask |= (1 << tx_core);
+		sw_used_core_mask |= ((uint64_t)1 << tx_core);
 	}
 
 	sw_port_mode_map[rx_port] = SW_PORT_RX;
@@ -649,10 +658,18 @@ static int sw_dpdk_port_stat(uint16_t portid, char* buf, int buf_len)
 		{
 			len += snprintf(buf+len, buf_len-len, "  [Ring%u]Deque-Ring:  %-12"PRIu64 "  Send-Ring:  %-12"PRIu64 "  Drop-Parse:  %-12"PRIu64 "Drop-Filter:  %-12"PRIu64"\n", 
 							i, port_sw_stat[portid].deque_ring[i], port_sw_stat[portid].send_ring[i],
-							port_sw_stat[portid].drop_by_not_parsed[i], port_sw_stat[portid].drop_by_filtered[i]);
+							port_sw_stat[portid].drop_by_parsed[i], port_sw_stat[portid].drop_by_filtered[i]);
 			//len += snprintf(buf+len, buf_len-len, "  [Ring%u]Send-Ring:  %-12"PRIu64"\n", i, port_sw_stat[portid].send_ring[i]);
-			//len += snprintf(buf+len, buf_len-len, "  [Ring%u]Drop-Parse:  %-12"PRIu64"\n", i, port_sw_stat[portid].drop_by_not_parsed[i]);
+			//len += snprintf(buf+len, buf_len-len, "  [Ring%u]Drop-Parse:  %-12"PRIu64"\n", i, port_sw_stat[portid].drop_by_parsed[i]);
 			//len += snprintf(buf+len, buf_len-len, "  [Ring%u]Drop-Filter:  %-12"PRIu64"\n", i, port_sw_stat[portid].drop_by_filtered[i]);
+		}
+
+		len += snprintf(buf+len, buf_len-len, "\n\nPackets Stat:\n\n");
+		for (i = 0; i < tx_num; i++)
+		{
+			len += snprintf(buf+len, buf_len-len, "  [Ring%u]VLAN:  %-12"PRIu64 "  MPLS:  %-12"PRIu64 "  IPv4:  %-12"PRIu64 "TCP:  %-12"PRIu64 "UDP:  %-12"PRIu64"\n", 
+							i, port_sw_stat[portid].vlan_pkts[i], port_sw_stat[portid].mpls_pkts[i],
+							port_sw_stat[portid].ipv4_pkts[i], port_sw_stat[portid].tcp_pkts[i], port_sw_stat[portid].udp_pkts[i]);
 		}
 	}
 	
@@ -660,9 +677,9 @@ static int sw_dpdk_port_stat(uint16_t portid, char* buf, int buf_len)
 }
 
 /**************************************************************/
-static int sw_dpdk_filter_pkt(struct rte_mbuf* m)
+static int sw_dpdk_filter_pkt(PKT_INFO_S *pkt_info)
 {
-	if (NULL == m)
+	if (NULL == pkt_info)
 		return -1;
 
 	
@@ -706,7 +723,7 @@ sw_dpdk_main_loop(void)
 	uint16_t tx_mode = 0;
 		
 	lcore_id = rte_lcore_id();
-	if ((sw_used_core_mask & (1 << lcore_id)) == 0 || 0 == lcore_id)
+	if ((sw_used_core_mask & ((uint64_t)1 << lcore_id)) == 0 || 0 == lcore_id)
 	{
 		RTE_LOG(INFO, VSWITCH, "lcore %u has nothing to do \n", lcore_id);
 		return;
@@ -782,10 +799,39 @@ sw_dpdk_main_loop(void)
 				port_sw_stat[tx_port].deque_ring[tx_queid]++;
 			
 				//对报文进行分析
-				if (0 > sw_dpdk_filter_pkt(m))
+				PKT_INFO_S pkt_info;
+				pkt_info.peth_pkt = rte_pktmbuf_mtod(m, uint8_t *);
+				pkt_info.pkt_len = rte_pktmbuf_pkt_len(m);
+				if (SW_PARSE_OK == sw_pkt_get_hdr(&pkt_info))
+				{
+					//统计信息
+					if (pkt_info.vlan_flag)
+						port_sw_stat[tx_port].vlan_pkts[tx_queid]++;
+
+					if (pkt_info.mpls_flag)
+						port_sw_stat[tx_port].mpls_pkts[tx_queid]++;
+
+					if (pkt_info.ipv4_flag)
+						port_sw_stat[tx_port].ipv4_pkts[tx_queid]++;
+
+					if (pkt_info.proto == PKT_IPPROTO_TCP)
+						port_sw_stat[tx_port].tcp_pkts[tx_queid]++;
+
+					if (pkt_info.proto == PKT_IPPROTO_UDP)
+						port_sw_stat[tx_port].udp_pkts[tx_queid]++;
+				}
+				else
+				{
+					port_sw_stat[tx_port].drop_by_parsed[tx_queid]++;
+					rte_pktmbuf_free(m);
+					continue;
+				}
+				
+				if (0 > sw_dpdk_filter_pkt(&pkt_info))
 				{
 					port_sw_stat[tx_port].drop_by_filtered[tx_queid]++;
 					rte_pktmbuf_free(m);
+					continue;
 				}
 			
 				do
