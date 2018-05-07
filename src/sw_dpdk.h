@@ -1,6 +1,8 @@
 #ifndef _SW_DPDK_H_
 #define _SW_DPDK_H_
 
+#include <inttypes.h>
+
 #define SW_DPDK_MAX_CORE 64
 #define SW_DPDK_MAX_PORT 24
 #define SW_DPDK_MAX_DELAY 10
@@ -54,6 +56,14 @@ typedef struct
 		}tx_mode_conf;
 	};
 }SW_CORE_CONF;
+
+uint32_t sw_dpdk_enabled_rx_port_mask(void);
+
+uint32_t sw_dpdk_enabled_port_mask(void);
+	
+int sw_dpdk_get_port_socket(uint16_t port_id);
+
+int sw_dpdk_start(void);
 
 int sw_dpdk_init(char *);
 

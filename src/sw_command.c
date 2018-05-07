@@ -15,17 +15,10 @@
 #include <sys/select.h>
 
 #include "sw_command.h"
+#include "sw_filter.h"
 
 #define SW_CMD_MAGIC       0xabcdbeef
 #define SW_CMD_SERVER_PORT 12345  
-
-static int sw_command_client_send_and_recv(SW_CMD_TYPE cmd_type, 
-														void* cmd_buf, 
-														int cmd_len,
-														void* recv_msg,
-														int recv_buff_len,
-														int* recv_len,
-														int timeout);
 
 static void sw_command_server_handle(int fd);
 
@@ -242,7 +235,6 @@ cmdline_parse_inst_t cmd_show_core_mode = {
 	},
 };
 
-
 /****************/
 
 cmdline_parse_ctx_t vswitch_ctx[] = {
@@ -251,6 +243,8 @@ cmdline_parse_ctx_t vswitch_ctx[] = {
 	(cmdline_parse_inst_t *)&cmd_kill_self,	
 	(cmdline_parse_inst_t *)&cmd_show_port_stats,
 	(cmdline_parse_inst_t *)&cmd_show_core_mode,
+//	(cmdline_parse_inst_t *)&cmd_set_acl,
+	(cmdline_parse_inst_t *)&cmd_show_acl,
 	NULL,
 };
 
@@ -276,6 +270,8 @@ typedef struct
 	SW_CMD_SHOW_CORE_MODE show_core_mode;
 	SW_CMD_SHOW_PORT show_port;
 	SW_KILL_SELF kill_self;
+	SW_CMD_SET_ACL set_acl;
+	SW_CMD_SHOW_ACL show_acl;
 }SW_CMD_FUNC_MAP;
 
 SW_CMD_FUNC_MAP sw_cmd_func_map = {0};
@@ -395,6 +391,24 @@ int sw_command_register_show_core_mode(SW_CMD_SHOW_CORE_MODE func)
 	return 0;
 }
 
+int sw_command_register_set_acl(SW_CMD_SET_ACL func)
+{
+	if (sw_cmd_func_map.set_acl != NULL)
+		return -1;
+
+	sw_cmd_func_map.set_acl = func;
+	return 0;
+}
+
+int sw_command_register_show_acl(SW_CMD_SHOW_ACL func)
+{
+	if (sw_cmd_func_map.show_acl != NULL)
+		return -1;
+
+	sw_cmd_func_map.show_acl = func;
+	return 0;
+}
+
 int sw_command_register_show_port(SW_CMD_SHOW_PORT func)
 {
 	if (sw_cmd_func_map.show_port != NULL)
@@ -414,7 +428,7 @@ int sw_command_register_kill_self(SW_KILL_SELF func)
 }
 
 //////////////////////////////////////////////
-static int sw_command_client_send_and_recv(SW_CMD_TYPE cmd_type, 
+int sw_command_client_send_and_recv(SW_CMD_TYPE cmd_type, 
 														void* cmd_buf, 
 														int cmd_len,
 														void* recv_msg,
@@ -536,7 +550,20 @@ void sw_command_server_handle(int fd)
 			if (NULL != sw_cmd_func_map.show_core_mode)
 				resp_len = sw_cmd_func_map.show_core_mode(resp_buf, SW_CMD_BUFF_LEN);
 		}
-
+		else if (SW_CMD_TYPE_SET_ACL == ntohl(cmd_req->cmd_type))
+		{
+			struct cmd_set_acl_result* res = (struct cmd_set_acl_result*)(buf + sizeof(SW_CMD_REQUEST));
+			if (NULL != sw_cmd_func_map.set_acl)
+				resp_len = sw_cmd_func_map.set_acl((void*)res, resp_buf, SW_CMD_BUFF_LEN);
+		}
+		else if (SW_CMD_TYPE_SHOW_ACL == ntohl(cmd_req->cmd_type))
+		{
+			struct cmd_show_acl_result* res = (struct cmd_show_acl_result*)(buf + sizeof(SW_CMD_REQUEST));
+			uint16_t portid = res->port_id;
+			if (NULL != sw_cmd_func_map.show_acl)
+				resp_len = sw_cmd_func_map.show_acl(portid, resp_buf, SW_CMD_BUFF_LEN);
+		}
+		
 		int send_len = resp_len + sizeof(SW_CMD_RESPONSE);
 		char send_buf[SW_CMD_BUFF_LEN];
 		SW_CMD_RESPONSE* rsp = (SW_CMD_RESPONSE* )send_buf;

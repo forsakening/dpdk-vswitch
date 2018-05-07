@@ -204,8 +204,10 @@ int sw_pkt_get_hdr(PKT_INFO_S *ppkt_info)
 	if (NULL == ppkt_info || NULL == ppkt_info->peth_pkt || PKT_ETH_HLEN >= ppkt_info->pkt_len)
         return SW_PARSE_ERR;
 
+	ppkt_info->l2 = NULL;
+	ppkt_info->l3 = NULL;
+	ppkt_info->l4 = NULL;
 	ppkt_info->ipfrag_flag = 0;
-	//ppkt_info->gre_flag = 0;
 	ppkt_info->mpls_flag = 0;
 	ppkt_info->vlan_flag = 0;
 	ppkt_info->ipv4_flag = 0;
@@ -338,19 +340,6 @@ int pkt_parse_nethdr(PKT_INFO_S *ppkt_info)
 	{
 		ppkt_info->ipfrag_flag=0;
 	}
-
-	//switch (pip_hdr->proto)
-	//{
-	//	case GRE_IP_PROTO_TYPE:
-		
-	//	    ppkt_info->gre_flag = 1;//gre°ü
-	//	    ppkt_info->pgre_pkt = ppkt_info->ptrans_pkt;
-	//	    ppkt_info->gre_len  = ppkt_info->trans_len;
-		    
-	//		return pkt_parse_gre(ppkt_info, iph_len);
-	//	default:
-	//		break; 
-	//}
 
     return SW_PARSE_OK;
 }

@@ -84,19 +84,19 @@ typedef struct
     uint8_t *pnet_pkt;      //网络层指针，网络层起始
     uint8_t *ptrans_pkt;    //传输层指针，传输层起始
     uint8_t *papp_pkt;      //数据层指针，数据层起始
-    //uint8_t *pgre_pkt;
     uint8_t *pmpls_pkt;
+	uint8_t *l2;
+	uint8_t *l3;
+	uint8_t *l4;
     uint16_t pkt_len;      //整个报文长度
     uint16_t ethh_len;      //2-2.5层头长度
     uint16_t net_len;      //ip数据长度，网络层+传输层+应用层
     uint16_t trans_len;    //传输层数据长度，传输层+应用层
     uint16_t app_len;      //应用层数据长度
-    //uint16_t gre_len;      //应用层数据长度
     uint16_t mpls_len;      //应用层数据长度
     uint16_t eth_pack_num;   //2.5层封装层数
     uint8_t  vlan_flag;
 	uint8_t  ipfrag_flag;  //ip分片标记，1分片
-	//uint8_t  gre_flag;  //需要再次处理的gtp标记，1gtp
 	uint8_t  mpls_flag;  
 	uint8_t  ipv4_flag;
 	uint16_t app_proto; //应用层协议类型

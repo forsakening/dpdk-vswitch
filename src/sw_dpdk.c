@@ -1,6 +1,7 @@
 //@20180408 by Shawn.Z v1.0 just for test 2 ports
 //@20180411 by Shawn.Z v1.1 support configuration
 //@20180413 by Shawn.Z v1.2 support packet parse
+//@20180414 by Shawn.Z v1.3 support tuple filter
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -44,6 +45,7 @@
 #include "sw_command.h"
 #include "sw_config.h"
 #include "sw_parse.h"
+#include "sw_filter.h"
 
 #define RTE_LOGTYPE_VSWITCH RTE_LOGTYPE_USER1
 
@@ -126,6 +128,21 @@ struct sw_dpdk_port_hw_stat{
 	uint64_t tx_pps_total;			//发送的所有包
 } __rte_cache_aligned;
 struct sw_dpdk_port_hw_stat port_hw_stat[SW_DPDK_MAX_PORT] = {{0}};
+
+uint32_t sw_dpdk_enabled_rx_port_mask(void)
+{
+	return sw_used_rx_port_mask;
+}
+
+uint32_t sw_dpdk_enabled_port_mask(void)
+{
+	return sw_enabled_port_mask;
+}
+
+int sw_dpdk_get_port_socket(uint16_t port_id)
+{
+	return rte_eth_dev_socket_id(port_id);
+}
 
 static int sw_dpdk_setup_port_peer(uint16_t rx_port,
 											  uint16_t tx_port,
@@ -677,14 +694,6 @@ static int sw_dpdk_port_stat(uint16_t portid, char* buf, int buf_len)
 }
 
 /**************************************************************/
-static int sw_dpdk_filter_pkt(PKT_INFO_S *pkt_info)
-{
-	if (NULL == pkt_info)
-		return -1;
-
-	
-	return 0;
-}
 
 static void
 sw_dpdk_tx_pkts(uint16_t port_id, uint16_t queue_id,
@@ -749,6 +758,7 @@ sw_dpdk_main_loop(void)
 		tx_ring = core_conf->tx_mode_conf.tx_ring;
 		delay = sw_port_peer[tx_port].delay_s;
 		tx_mode = 1;
+		rx_port = sw_port_peer[tx_port].rx_port;
 	}
 	else
 	{
@@ -797,7 +807,7 @@ sw_dpdk_main_loop(void)
 			else
 			{
 				port_sw_stat[tx_port].deque_ring[tx_queid]++;
-			
+
 				//对报文进行分析
 				PKT_INFO_S pkt_info;
 				pkt_info.peth_pkt = rte_pktmbuf_mtod(m, uint8_t *);
@@ -827,7 +837,7 @@ sw_dpdk_main_loop(void)
 					continue;
 				}
 				
-				if (0 > sw_dpdk_filter_pkt(&pkt_info))
+				if (0 > sw_filter_port(rx_port, &pkt_info))
 				{
 					port_sw_stat[tx_port].drop_by_filtered[tx_queid]++;
 					rte_pktmbuf_free(m);
@@ -932,10 +942,35 @@ sw_dpdk_signal_handler(int signum)
 	}
 }
 
+int sw_dpdk_start(void)
+{	
+	unsigned lcore_id, portid;
+	
+	/* launch per-lcore init on every lcore */
+	start_work = true;
+	rte_eal_mp_remote_launch(sw_dpdk_launch_one_lcore, NULL, CALL_MASTER);
+	RTE_LCORE_FOREACH_SLAVE(lcore_id) {
+		if (rte_eal_wait_lcore(lcore_id) < 0) {
+			break;
+		}
+	}
+
+	for (portid = 0; portid < sw_dpdk_total_port; portid++) {
+		if ((sw_enabled_port_mask & (1 << portid)) == 0)
+			continue;
+		printf("Closing port %d...", portid);
+		rte_eth_dev_stop(portid);
+		rte_eth_dev_close(portid);
+		printf(" Done\n");
+	}
+	printf("Bye...\n");
+
+	return 0;
+}
+
 int sw_dpdk_init(char* conf_path)
 {
-	int ret,i;
-	unsigned lcore_id, portid;
+	int i,ret;
 
 	//signal
 	force_quit = false;
@@ -1007,28 +1042,6 @@ int sw_dpdk_init(char* conf_path)
 		return -1;
 	}
 
-	//wait 
-	ret = 0;
-	/* launch per-lcore init on every lcore */
-	start_work = true;
-	rte_eal_mp_remote_launch(sw_dpdk_launch_one_lcore, NULL, CALL_MASTER);
-	RTE_LCORE_FOREACH_SLAVE(lcore_id) {
-		if (rte_eal_wait_lcore(lcore_id) < 0) {
-			ret = -1;
-			break;
-		}
-	}
-
-	for (portid = 0; portid < sw_dpdk_total_port; portid++) {
-		if ((sw_enabled_port_mask & (1 << portid)) == 0)
-			continue;
-		printf("Closing port %d...", portid);
-		rte_eth_dev_stop(portid);
-		rte_eth_dev_close(portid);
-		printf(" Done\n");
-	}
-	printf("Bye...\n");
-
-	return ret;
+	return 0;
 }
 
