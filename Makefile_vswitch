@@ -8,7 +8,14 @@ APP = vswitch
 
 ifeq ($(DEBUG),Y)
 EXTRA_CFLAGS=-g
+CFLAGS += -O0
+else
+CFLAGS += -O3
 endif
+
+EXTRA_CFLAGS += -I/usr/local/include/hs/
+EXTRA_LDFLAGS += -L/usr/local/lib64/
+EXTRA_LDLIBS += -lhs -lstdc++ -lm
 
 # all source are stored in SRCS-y
 SRCS-y := src/sw_main.c 
@@ -16,6 +23,8 @@ SRCS-y += src/sw_dpdk.c
 SRCS-y += src/sw_command.c
 SRCS-y += src/sw_config.c
 SRCS-y += src/sw_parse.c
+SRCS-y += src/sw_filter.c
+SRCS-y += src/sw_offset.c
 
 RTE_SDK=/usr/local/dpdk/share/dpdk/
 
@@ -28,7 +37,6 @@ RTE_TARGET ?= x86_64-native-linuxapp-gcc
 
 include $(RTE_SDK)/mk/rte.vars.mk
 
-CFLAGS += -O3
 CFLAGS += $(WERROR_FLAGS)
 
 include $(RTE_SDK)/mk/rte.extapp.mk

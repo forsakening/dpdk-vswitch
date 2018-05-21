@@ -290,7 +290,7 @@ static int sw_dpdk_make_fwd_rules(void)
 
 		if (sw_port_peer_fwd_rules[i].acl_filter_mode == SW_FILTER_ACL_RXPORT)
 			sw_acl_filter_tx_port[i] = i;
-		else if (sw_port_peer_fwd_rules[i].acl_filter_mode == SW_FILTER_ACL_RXPORT)
+		else if (sw_port_peer_fwd_rules[i].acl_filter_mode == SW_FILTER_ACL_TXPORT)
 			sw_acl_filter_tx_port[i] = sw_port_peer[i].tx_port;
 
 		if (sw_port_peer_fwd_rules[i].offset_filter_mode == SW_FILTER_OFF_RXPORT)
@@ -1432,7 +1432,7 @@ int sw_dpdk_start(void)
 	{
 		if (force_quit)
 		{
-			sleep(1);
+			sleep(3);
 			break;
 		}
 		sleep(1);

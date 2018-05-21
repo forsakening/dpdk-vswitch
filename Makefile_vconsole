@@ -10,9 +10,18 @@ ifeq ($(DEBUG),Y)
 EXTRA_CFLAGS=-g
 endif
 
+EXTRA_CFLAGS += -I/usr/local/include/hs/
+EXTRA_LDFLAGS += -L/usr/local/lib64/
+EXTRA_LDLIBS += -lhs -lstdc++ -lm
+
 # all source are stored in SRCS-y
 SRCS-y := src/sw_console.c 
 SRCS-y += src/sw_command.c
+SRCS-y += src/sw_filter.c
+SRCS-y += src/sw_dpdk.c
+SRCS-y += src/sw_parse.c
+SRCS-y += src/sw_config.c
+SRCS-y += src/sw_offset.c
 
 RTE_SDK=/usr/local/dpdk/share/dpdk/
 
