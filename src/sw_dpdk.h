@@ -7,7 +7,7 @@
 #define SW_DPDK_MAX_PORT 24
 #define SW_DPDK_MAX_DELAY 20
 #define SW_DPDK_MAX_MBUF_NUM 3000000 //每秒需要的报文数目
-#define SW_DPDK_MAX_TX_NUM 6
+#define SW_DPDK_MAX_TX_NUM 8
 #define SW_DPDK_Log_Error(fmt,...) printf("\033[0;32;31m[SWDPDK ERROR] \033[m"fmt, ##__VA_ARGS__);
 #define SW_DPDK_Log_Info(fmt,...) printf("\033[0;32;32m[SWDPDK INFO] \033[m"fmt, ##__VA_ARGS__);
 

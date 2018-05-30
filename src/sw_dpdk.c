@@ -58,7 +58,7 @@
 static volatile bool force_quit = false;
 static volatile bool sw_dpdk_eal_init = false;
 
-#define MAX_PKT_BURST 32
+#define MAX_PKT_BURST 64
 #define MEMPOOL_CACHE_SIZE 256
 
 #define SW_BURST_TX_DRAIN_US 100 // us 
@@ -66,7 +66,7 @@ static volatile bool sw_dpdk_eal_init = false;
 /*
  * Configurable number of RX/TX ring descriptors
  */
-#define RTE_TEST_RX_DESC_DEFAULT 2048
+#define RTE_TEST_RX_DESC_DEFAULT 4096
 #define RTE_TEST_TX_DESC_DEFAULT 2048
 static uint16_t nb_rxd = RTE_TEST_RX_DESC_DEFAULT;
 static uint16_t nb_txd = RTE_TEST_TX_DESC_DEFAULT;
@@ -77,13 +77,15 @@ static uint32_t sw_enabled_port_mask = 0;
 static volatile bool start_work = false;
 static SW_PORT_PEER sw_port_peer[SW_DPDK_MAX_PORT] = {{0}}; // use rx port as the array id
 static SW_PORT_PEER_FWD_RULES sw_port_peer_fwd_rules[SW_DPDK_MAX_PORT] = {{0}}; // use rx port as the array id
-static uint64_t sw_used_core_mask = 1; // core 0 is used default
+static uint64_t sw_used_core_mask_low = 1; // core 0 is used default  0 ~ 63
+static uint64_t sw_used_core_mask_high = 0;// 64 ~ 127
 static uint32_t sw_used_port_mask = 0;
 static uint32_t sw_used_rx_port_mask = 0;
 static uint16_t sw_dpdk_total_port = 0;
 static SW_PORT_MODE sw_port_mode_map[SW_DPDK_MAX_PORT] = {0};
 static SW_CORE_CONF sw_core_conf[SW_DPDK_MAX_CORE] = {{0}};
 static uint32_t sw_dpdk_pps = SW_DPDK_MAX_MBUF_NUM;
+static uint32_t sw_running_seconds = 0;
 
 //用于加速
 static uint16_t sw_len_filter_tx_port[SW_DPDK_MAX_PORT] = {0};
@@ -193,7 +195,7 @@ static int sw_dpdk_setup_port_peer(uint16_t rx_port,
 											  uint16_t *tx_core_map)
 {
 	int i = 0;
-	
+	uint64_t sw_used_core_mask;
 	if (tx_core_num > SW_DPDK_MAX_TX_NUM || 0 == tx_core_num)
 	{
 		SW_DPDK_Log_Error("tx_core_num error, %d \n", tx_core_num);
@@ -212,7 +214,12 @@ static int sw_dpdk_setup_port_peer(uint16_t rx_port,
 		return -1;
 	}
 
-	if ((sw_used_core_mask & ((uint64_t)1 << rx_core)) != 0)
+	if (rx_core >= 64)
+		sw_used_core_mask = sw_used_core_mask_high;
+	else
+		sw_used_core_mask = sw_used_core_mask_low;
+	
+	if ((sw_used_core_mask & ((uint64_t)1 << (rx_core % 64))) != 0)
 	{
 		SW_DPDK_Log_Error("rx core : %u already used ! \n", rx_core);
 		return -1;
@@ -222,7 +229,12 @@ static int sw_dpdk_setup_port_peer(uint16_t rx_port,
 	for (i = 0; i < tx_core_num; i++)
 	{
 		tx_core = tx_core_map[i];
-		if ((sw_used_core_mask & ((uint64_t)1 << tx_core)) != 0)
+		if (tx_core >= 64)
+			sw_used_core_mask = sw_used_core_mask_high;
+		else
+			sw_used_core_mask = sw_used_core_mask_low;
+		
+		if ((sw_used_core_mask & ((uint64_t)1 << (tx_core % 64))) != 0)
 		{
 			SW_DPDK_Log_Error("tx core : %u already used ! \n", tx_core);
 			return -1;
@@ -240,11 +252,20 @@ static int sw_dpdk_setup_port_peer(uint16_t rx_port,
 
 	sw_used_port_mask |= (1 << rx_port);
 	sw_used_port_mask |= (1 << tx_port);
-	sw_used_core_mask |= ((uint64_t)1 << rx_core);
+
+	if (rx_core >= 64)
+		sw_used_core_mask_high |= ((uint64_t)1 << (rx_core % 64));
+	else
+		sw_used_core_mask_low |= ((uint64_t)1 << (rx_core % 64));
+	
 	for (i = 0; i < tx_core_num; i++)
 	{
 		tx_core = tx_core_map[i];
-		sw_used_core_mask |= ((uint64_t)1 << tx_core);
+
+		if (tx_core >= 64)
+			sw_used_core_mask_high |= ((uint64_t)1 << (tx_core % 64));
+		else
+			sw_used_core_mask_low |= ((uint64_t)1 << (tx_core % 64));
 	}
 
 	sw_port_mode_map[rx_port] = SW_PORT_RX;
@@ -557,8 +578,8 @@ static int sw_dpdk_init_eal(void)
     char* argv[64] = {0};
 
 	//根据conf配置需要初始化的core
-	char core_mask[16] = {0};
-	sprintf(core_mask, "%llx", (long long unsigned int)sw_used_core_mask);
+	char core_mask[32] = {0};
+	sprintf(core_mask, "%llx%llx", (long long unsigned int)sw_used_core_mask_high, (long long unsigned int)sw_used_core_mask_low);
 
 	strcpy(argvstr[argc], "vswitch"); argv[argc] = argvstr[argc]; argc++;
     strcpy(argvstr[argc], "-c"); argv[argc] = argvstr[argc]; argc++;
@@ -577,12 +598,17 @@ static int sw_dpdk_init_eal(void)
 	//rte_log_set_level(RTE_LOGTYPE_EAL,RTE_LOG_DEBUG);
 	ret = rte_eal_init(argc, argv);
 	if (ret < 0)
-		rte_exit(EXIT_FAILURE, "Invalid EAL arguments\n");
-
+	{
+		SW_DPDK_Log_Error("Invalid EAL arguments\n");
+		return -1;
+	}
 
 	sw_dpdk_total_port = rte_eth_dev_count();
 	if (0 == sw_dpdk_total_port)
-		rte_exit(EXIT_FAILURE, "Total port is zeor ! \n");
+	{
+		SW_DPDK_Log_Error("Total port is zeor ! \n");
+		return -1;
+	}
 	else
 		SW_DPDK_Log_Info("Total Port is %u ...\n", sw_dpdk_total_port);
 	
@@ -600,8 +626,11 @@ static int sw_dpdk_init_buffer(void)
 			continue;
 		
 		if (0 > sw_dpdk_setup_buffer(i))
-			rte_exit(EXIT_FAILURE, "Port %u setup buffer error ! \n", i);
-
+		{
+			SW_DPDK_Log_Error("Port %u setup buffer error ! \n", i);
+			return -1;
+		}
+		
 		sw_dpdk_update_conf(i);
 	}
 
@@ -641,17 +670,26 @@ static int sw_dpdk_init_port(void)
 			tx_que_cnt = sw_port_peer[portid].tx_core_num;
 			ret = rte_eth_dev_configure(portid, 1, tx_que_cnt, &local_port_conf);
 			if (ret < 0)
-				rte_exit(EXIT_FAILURE, "Cannot configure device: err=%d, port=%u\n", ret, portid);
+			{
+				SW_DPDK_Log_Error("Cannot configure device: err=%d, port=%u\n", ret, portid);
+				return -1;
+			}
 			
 			ret = rte_eth_dev_adjust_nb_rx_tx_desc(portid, &nb_rxd, &nb_txd);
 			if (ret < 0)
-				rte_exit(EXIT_FAILURE, "Cannot adjust number of descriptors: err=%d, port=%u\n", ret, portid);
+			{
+				SW_DPDK_Log_Error("Cannot adjust number of descriptors: err=%d, port=%u\n", ret, portid);
+				return -1;
+			}
 		
 			fflush(stdout);
 
 			mpool = sw_port_peer[portid].rx_mempool;
 			if (NULL == mpool)
-				rte_exit(EXIT_FAILURE, "Rx Port %u mpool null !\n", portid);
+			{
+				SW_DPDK_Log_Error("Rx Port %u mpool null !\n", portid);
+				return -1;
+			}
 			
 			rxq_conf = dev_info.default_rxconf;
 			rxq_conf.offloads = local_port_conf.rxmode.offloads;
@@ -660,7 +698,10 @@ static int sw_dpdk_init_port(void)
 						     &rxq_conf,
 						     mpool);
 			if (ret < 0)
-				rte_exit(EXIT_FAILURE, "rte_eth_rx_queue_setup:err=%d, port=%u\n", ret, portid);
+			{
+				SW_DPDK_Log_Error("rte_eth_rx_queue_setup:err=%d, port=%u\n", ret, portid);
+				return -1;
+			}
 
 			txq_conf = dev_info.default_txconf;
 			txq_conf.txq_flags = ETH_TXQ_FLAGS_IGNORE;
@@ -670,7 +711,10 @@ static int sw_dpdk_init_port(void)
 			{
 				ret = rte_eth_tx_queue_setup(portid, j, nb_txd, rte_eth_dev_socket_id(portid), &txq_conf);
 				if (ret < 0)
-					rte_exit(EXIT_FAILURE, "rte_eth_tx_queue_setup:err=%d, port=%u, que=%u\n", ret, portid, j);
+				{
+					SW_DPDK_Log_Error("rte_eth_tx_queue_setup:err=%d, port=%u, que=%u\n", ret, portid, j);
+					return -1;
+				}
 			}
 		}
 		else if (sw_port_mode_map[portid] == SW_PORT_TX)
@@ -678,13 +722,18 @@ static int sw_dpdk_init_port(void)
 			tx_que_cnt = sw_port_peer[portid].tx_core_num;
 			ret = rte_eth_dev_configure(portid, 0, tx_que_cnt, &local_port_conf);
 			if (ret < 0)
-				rte_exit(EXIT_FAILURE, "Cannot configure device: err=%d, port=%u\n", ret, portid);
+			{
+				SW_DPDK_Log_Error("Cannot configure device: err=%d, port=%u\n", ret, portid);
+				return -1;
+			}
 
 			ret = rte_eth_dev_adjust_nb_rx_tx_desc(portid, &nb_rxd, &nb_txd);
 			if (ret < 0)
-				rte_exit(EXIT_FAILURE,
-					 "Cannot adjust number of descriptors: err=%d, port=%u\n", ret, portid);
-		
+			{
+				SW_DPDK_Log_Error("Cannot adjust number of descriptors: err=%d, port=%u\n", ret, portid);
+				return -1;
+			}
+				
 			/* init one TX queue on each port */
 			fflush(stdout);
 			txq_conf = dev_info.default_txconf;
@@ -696,14 +745,20 @@ static int sw_dpdk_init_port(void)
 			{
 				ret = rte_eth_tx_queue_setup(portid, j, nb_txd, rte_eth_dev_socket_id(portid), &txq_conf);
 				if (ret < 0)
-					rte_exit(EXIT_FAILURE, "rte_eth_tx_queue_setup:err=%d, port=%u, que=%u\n", ret, portid, j);
+				{
+					SW_DPDK_Log_Error("rte_eth_tx_queue_setup:err=%d, port=%u, que=%u\n", ret, portid, j);
+					return -1;
+				}
 			}
 		}
 
 		/* Start device */
 		ret = rte_eth_dev_start(portid);
 		if (ret < 0)
-			rte_exit(EXIT_FAILURE, "rte_eth_dev_start:err=%d, port=%u\n", ret, portid);
+		{
+			SW_DPDK_Log_Error("rte_eth_dev_start:err=%d, port=%u\n", ret, portid);
+			return -1;
+		}
 
 		printf("done: \n");
 
@@ -800,12 +855,18 @@ static void* sw_dpdk_calc_statistic_thread(void* parg)
 
 static int sw_dpdk_core_map(char* buf, int buf_len)
 {
+	uint64_t sw_used_core_mask;
 	int len = 0;
 	len += snprintf(buf+len, buf_len-len,"\n");
 	uint16_t i;
 	for (i = 0; i < SW_DPDK_MAX_CORE; i++)
 	{
-		if ((sw_used_core_mask & ((uint64_t)1<<i)) == 0)
+		if (i >= 64)
+			sw_used_core_mask = sw_used_core_mask_high;
+		else
+			sw_used_core_mask = sw_used_core_mask_low;
+	
+		if ((sw_used_core_mask & ((uint64_t)1<<(i%64))) == 0)
 			continue;
 
 		if (sw_core_conf[i].core_mode == SW_CORE_RX)
@@ -839,6 +900,8 @@ static int sw_dpdk_port_stat(uint16_t portid, char* buf, int buf_len)
 		len += snprintf(buf+len, buf_len-len, "PortID:%u is not enabled, PortMask:%d!\n", portid, sw_enabled_port_mask);
 		return len;
 	}
+
+	len += snprintf(buf+len, buf_len-len, "[vSwitch Running Seconds:%u ]\n", sw_running_seconds);
 
 	if (sw_port_mode_map[portid] == SW_PORT_RX)
 	{
@@ -900,17 +963,17 @@ static int sw_dpdk_port_stat(uint16_t portid, char* buf, int buf_len)
 	struct rte_eth_stats stats;
 	rte_eth_stats_get(portid, &stats);
 
-	len += snprintf(buf+len, buf_len-len, "  RX-packets: %-12"PRIu64" RX-bytes:  %-12"PRIu64"\n", stats.ipackets,stats.ibytes);
-    len += snprintf(buf+len, buf_len-len, "  RX-error  : %-12"PRIu64"     Reason:[CRC or BadLen Error By Packet]\n",  stats.ierrors);
-	len += snprintf(buf+len, buf_len-len, "  RX-nombuf : %-12"PRIu64"     Reason:[Mempool Not Enough, Not Equal To Packet Num]\n", stats.rx_nombuf);
-    len += snprintf(buf+len, buf_len-len, "  RX-missed : %-12"PRIu64"     Reason:[Fwd Thread Been Scheduled or Enque Nic Que Error Happen]\n", stats.imissed);
-	len += snprintf(buf+len, buf_len-len, "  TX-packets: %-12"PRIu64" TX-errors: %-12"PRIu64" TX-bytes:  "
+	len += snprintf(buf+len, buf_len-len, "  RX-packets: %-18"PRIu64" RX-bytes:  %-18"PRIu64"\n", stats.ipackets,stats.ibytes);
+    len += snprintf(buf+len, buf_len-len, "  RX-error  : %-18"PRIu64"     Reason:[CRC or BadLen Error By Packet]\n",  stats.ierrors);
+	len += snprintf(buf+len, buf_len-len, "  RX-nombuf : %-18"PRIu64"     Reason:[Mempool Not Enough, Not Equal To Packet Num]\n", stats.rx_nombuf);
+    len += snprintf(buf+len, buf_len-len, "  RX-missed : %-18"PRIu64"     Reason:[Fwd Thread Been Scheduled or Enque Nic Que Error Happen]\n", stats.imissed);
+	len += snprintf(buf+len, buf_len-len, "  TX-packets: %-18"PRIu64" TX-errors: %-18"PRIu64" TX-bytes:  "
 		   "%-"PRIu64"\n",
 		   stats.opackets, stats.oerrors, stats.obytes);
-	len += snprintf(buf+len, buf_len-len, "  TX-dropped:  %-12"PRIu64"\n", port_hw_stat[portid].dropped);
-	len += snprintf(buf+len, buf_len-len, "  RX-pps:	  %-12"PRIu64" TX-pps:	  %-12"PRIu64"\n",port_hw_stat[portid].rx_pps,port_hw_stat[portid].tx_pps);
-	len += snprintf(buf+len, buf_len-len, "  RX-bps:	  %-12"PRIu64" TX-bps:	  %-12"PRIu64"\n",port_hw_stat[portid].rx_bps,port_hw_stat[portid].tx_bps);
-	len += snprintf(buf+len, buf_len-len, "  RX-pps-total:	  %-12"PRIu64" TX-pps-total:	  %-12"PRIu64"\n",\
+	len += snprintf(buf+len, buf_len-len, "  TX-dropped:  %-18"PRIu64"\n", port_hw_stat[portid].dropped);
+	len += snprintf(buf+len, buf_len-len, "  RX-pps:	  %-18"PRIu64" TX-pps:	  %-18"PRIu64"\n",port_hw_stat[portid].rx_pps,port_hw_stat[portid].tx_pps);
+	len += snprintf(buf+len, buf_len-len, "  RX-bps:	  %-18"PRIu64" TX-bps:	  %-18"PRIu64"\n",port_hw_stat[portid].rx_bps,port_hw_stat[portid].tx_bps);
+	len += snprintf(buf+len, buf_len-len, "  RX-pps-total:	  %-18"PRIu64" TX-pps-total:	  %-18"PRIu64"\n",\
                 port_hw_stat[portid].rx_pps_total, port_hw_stat[portid].tx_pps_total);
 
 	
@@ -921,7 +984,7 @@ static int sw_dpdk_port_stat(uint16_t portid, char* buf, int buf_len)
 		tx_num = sw_port_peer[portid].tx_core_num;
 		for (i = 0; i < tx_num; i++)
 		{
-			len += snprintf(buf+len, buf_len-len, "  [Ring%u]Enque-Ring:  %-12"PRIu64 "  Drop-Ring:  %-12"PRIu64"\n", 
+			len += snprintf(buf+len, buf_len-len, "  [Ring%u]Enque-Ring:  %-18"PRIu64 "  Drop-Ring:  %-18"PRIu64"\n", 
 							i, port_sw_stat[portid].enque_ring[i], port_sw_stat[portid].drop_by_no_ring[i]);
 		}
 	}
@@ -930,7 +993,7 @@ static int sw_dpdk_port_stat(uint16_t portid, char* buf, int buf_len)
 		tx_num = sw_port_peer[portid].tx_core_num;
 		for (i = 0; i < tx_num; i++)
 		{
-			len += snprintf(buf+len, buf_len-len, "  [Ring%u]Deque-Cache-Ring:  %-12"PRIu64 "In-Delay-Ring:  %-12"PRIu64 "Out-Delay-Ring:  %-12"PRIu64 "Drop-Parse:  %-12"PRIu64 "Filter-Len:  %-12"PRIu64 "Filter-Syn:  %-12"PRIu64 "Filter-Acl:  %-12"PRIu64 "Filter-Offset:  %-12"PRIu64"\n", 
+			len += snprintf(buf+len, buf_len-len, "  [Ring%u]Deque-Cache-Ring:  %-18"PRIu64 "In-Delay-Ring:  %-18"PRIu64 "Out-Delay-Ring:  %-18"PRIu64 "Drop-Parse:  %-18"PRIu64 "Filter-Len:  %-18"PRIu64 "Filter-Syn:  %-18"PRIu64 "Filter-Acl:  %-18"PRIu64 "Filter-Offset:  %-18"PRIu64"\n", 
 							i, port_sw_stat[portid].deque_cache_ring[i], port_sw_stat[portid].enque_tx_ring[i],
 							port_sw_stat[portid].deque_tx_ring[i],
 							port_sw_stat[portid].drop_by_parsed[i], port_sw_stat[portid].filter_len[i], port_sw_stat[portid].filter_syn[i], 
@@ -940,7 +1003,7 @@ static int sw_dpdk_port_stat(uint16_t portid, char* buf, int buf_len)
 		len += snprintf(buf+len, buf_len-len, "\n\nPackets Stat:\n\n");
 		for (i = 0; i < tx_num; i++)
 		{
-			len += snprintf(buf+len, buf_len-len, "  [Ring%u]VLAN:  %-12"PRIu64 "  MPLS:  %-12"PRIu64 "  IPv4:  %-12"PRIu64 "ICMP:  %-12"PRIu64 "TCP:  %-12"PRIu64 "UDP:  %-12"PRIu64"\n", 
+			len += snprintf(buf+len, buf_len-len, "  [Ring%u]VLAN:  %-18"PRIu64 "  MPLS:  %-18"PRIu64 "  IPv4:  %-18"PRIu64 "ICMP:  %-18"PRIu64 "TCP:  %-18"PRIu64 "UDP:  %-18"PRIu64"\n", 
 							i, port_sw_stat[portid].vlan_pkts[i], port_sw_stat[portid].mpls_pkts[i],
 							port_sw_stat[portid].ipv4_pkts[i], port_sw_stat[portid].icmp_pkts[i],
 							port_sw_stat[portid].tcp_pkts[i], port_sw_stat[portid].udp_pkts[i]);
@@ -976,7 +1039,7 @@ sw_dpdk_tx_pkts(uint16_t port_id, uint16_t queue_id,
 }
 
 //cache ring 进行解析
-static void sw_dpdk_get_parse(struct rte_ring *cache_ring, struct rte_ring *tx_ring, uint16_t rx_port, uint16_t tx_port, uint16_t tx_queid)
+static void sw_dpdk_get_parse(struct rte_ring *cache_ring, struct rte_ring *tx_ring, uint16_t rx_port, uint16_t tx_port, uint16_t tx_queid, uint16_t loopback)
 {
 	int i;
 	struct rte_mbuf *m;
@@ -986,6 +1049,9 @@ static void sw_dpdk_get_parse(struct rte_ring *cache_ring, struct rte_ring *tx_r
 		return;
 
 	port_sw_stat[tx_port].deque_cache_ring[tx_queid] += num;
+
+	if (loopback)
+		sw_dpdk_tx_pkts(rx_port, tx_queid, m_bulk, num);
 
 	uint16_t len_filter_mode = sw_port_peer_fwd_rules[rx_port].len_filter_mode;
 	uint16_t syn_filter_mode = sw_port_peer_fwd_rules[rx_port].syn_filter_mode;
@@ -1072,7 +1138,10 @@ non_len_filter:
 		//syn 过滤
 		if (syn_filter_mode)
 		{
-			if (pkt_info.proto == PKT_IPPROTO_TCP && (pkt_info.trans_info.tcp.flags & 0x0200))
+			if (pkt_info.proto == PKT_IPPROTO_TCP && 
+				((pkt_info.trans_info.tcp.flags & 0x0200) ||
+				 (pkt_info.trans_info.tcp.flags & 0x0100) ||
+				 (pkt_info.trans_info.tcp.flags & 0x0400)))
 			{
 				port_sw_stat[tx_port].filter_syn[tx_queid] ++;
 				sw_dpdk_tx_pkts(syn_filter_tx_port, tx_queid, &m, 1);
@@ -1163,10 +1232,16 @@ sw_dpdk_main_loop(void *arg)
 	uint16_t loopback = 0;
 	uint8_t  get_new_pkt = 1;
 	const uint64_t drain_tsc = (rte_get_tsc_hz() + US_PER_S - 1) / US_PER_S * SW_BURST_TX_DRAIN_US;
+	uint64_t sw_used_core_mask;
 		
 	//lcore_id = rte_lcore_id();
 	lcore_id = *((unsigned *)arg);
-	if ((sw_used_core_mask & ((uint64_t)1 << lcore_id)) == 0 || 0 == lcore_id)
+	if (lcore_id >= 64)
+		sw_used_core_mask = sw_used_core_mask_high;
+	else
+		sw_used_core_mask = sw_used_core_mask_low;
+	
+	if ((sw_used_core_mask & ((uint64_t)1 << (lcore_id % 64))) == 0 || 0 == lcore_id)
 	{
 		RTE_LOG(INFO, VSWITCH, "lcore %u has nothing to do \n", lcore_id);
 		return NULL;
@@ -1263,22 +1338,22 @@ sw_dpdk_main_loop(void *arg)
 				port_sw_stat[rx_port].enque_ring[hash_id] += nb_rx;
 
 			//只有在回还的情况下rx port才会发包
-			if (loopback)
-			{
-				sw_dpdk_tx_pkts(rx_port, 0, pkts_burst, nb_rx);
+			//if (loopback)
+			//{
+			//	sw_dpdk_tx_pkts(rx_port, 0, pkts_burst, nb_rx);
 
 				// flush the tx buffer
-				if (unlikely(diff_tsc > drain_tsc)) {
-					rte_eth_tx_buffer_flush(rx_port, 0, sw_tx_buffer[rx_port][0]);
-					prev_tsc = cur_tsc;
-				}
-			}
+			//	if (unlikely(diff_tsc > drain_tsc)) {
+			//		rte_eth_tx_buffer_flush(rx_port, 0, sw_tx_buffer[rx_port][0]);
+			//		prev_tsc = cur_tsc;
+			//	}
+			//}
 		}
 		
 		if (tx_mode)
 		{		
 			//cache ring 进行解析
-			sw_dpdk_get_parse(cache_ring, tx_ring, rx_port, tx_port, tx_queid);
+			sw_dpdk_get_parse(cache_ring, tx_ring, rx_port, tx_port, tx_queid, loopback);
 
 			//发送真实数据
 			if (get_new_pkt)
@@ -1310,8 +1385,9 @@ sw_dpdk_main_loop(void *arg)
 			if (unlikely(diff_tsc > drain_tsc)) {
 
 				//rx
-				if (!loopback) 
-					rte_eth_tx_buffer_flush(rx_port, tx_queid, sw_tx_buffer[rx_port][tx_queid]);
+				rte_eth_tx_buffer_flush(rx_port, tx_queid, sw_tx_buffer[rx_port][tx_queid]);
+				//if (!loopback) 
+				//	rte_eth_tx_buffer_flush(rx_port, tx_queid, sw_tx_buffer[rx_port][tx_queid]);
 
 				//tx
 				rte_eth_tx_buffer_flush(tx_port, tx_queid, sw_tx_buffer[tx_port][tx_queid]);
@@ -1436,6 +1512,7 @@ int sw_dpdk_start(void)
 			break;
 		}
 		sleep(1);
+		sw_running_seconds++;
 	}
 	
 	for (portid = 0; portid < sw_dpdk_total_port; portid++) {
@@ -1533,14 +1610,20 @@ int sw_dpdk_init(char* conf_path, uint32_t dpdk_pps)
 	sw_dpdk_make_fwd_rules();
 		
 	// step 3
-	sw_dpdk_init_eal();
-
+	ret = sw_dpdk_init_eal();
+	if (0 > ret)
+		return -1;
+	
 	// step 4
-	sw_dpdk_init_buffer();
-		
+	ret = sw_dpdk_init_buffer();
+	if (0 > ret)
+		return -1;
+	
 	// step 5
-	sw_dpdk_init_port();
-
+	ret = sw_dpdk_init_port();
+	if (0 > ret)
+		return -1;
+	
 	// check all the links 
 	sw_dpdk_check_all_ports_link_status(sw_dpdk_total_port, sw_enabled_port_mask);
 
