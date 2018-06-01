@@ -22,6 +22,8 @@ typedef enum
 	SW_CMD_TYPE_SHOW_ACL,
 	SW_CMD_TYPE_SET_ACL,
 	SW_CMD_TYPE_SHOW_OFFSET,
+	SW_CMD_TYPE_SHOW_FWD,
+	SW_CMD_TYPE_SET_FWD,
 }SW_CMD_TYPE;
 
 //注册设置五元组接口
@@ -48,6 +50,16 @@ int sw_command_register_show_offset(SW_CMD_SHOW_OFFSET);
 //注册展示core模式接口
 typedef int (* SW_CMD_SHOW_CORE_MODE)(char*, int);
 int sw_command_register_show_core_mode(SW_CMD_SHOW_CORE_MODE);
+
+//注册展示fwd rule 接口
+typedef int (* SW_CMD_SHOW_FWD_RULE)(uint16_t, char*, int);
+int sw_command_register_show_fwd_rule(SW_CMD_SHOW_FWD_RULE);
+
+//注册修改fwd rule 接口
+//port,delay,loopback,len,len_mode,syn_mode,acl_mode,off_mode
+typedef int (* SW_CMD_SET_FWD_RULE)(uint16_t, uint16_t, uint16_t, uint16_t, uint16_t,uint16_t,uint16_t,uint16_t, char*, int);
+int sw_command_register_set_fwd_rule(SW_CMD_SET_FWD_RULE);
+
 
 //注册展示端口统计接口
 typedef int (* SW_CMD_SHOW_PORT)(uint16_t, char*, int);

@@ -85,7 +85,7 @@ int main(int argc, char ** argv)
 		goto _quit;
 	}
 
-	ret = sw_offset_init("../conf/offset.conf");
+	ret = sw_offset_init(SW_OFFSET_CFG);
 	if (ret < 0)
 	{
 		//sw_log(SW_LOG_ERROR, "sw_dpdk_init error, ret=%d!", ret);

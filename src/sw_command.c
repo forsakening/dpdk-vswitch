@@ -145,6 +145,158 @@ cmdline_parse_inst_t cmd_show_port_stats = {
 	},
 };
 
+//show fwd id
+///////////////////////////////////////
+struct cmd_show_fwd_result {
+	cmdline_fixed_string_t show;
+	cmdline_fixed_string_t fwd;
+	uint16_t port_id;
+};
+
+cmdline_parse_token_string_t cmd_show_fwd_show =
+	TOKEN_STRING_INITIALIZER
+		(struct cmd_show_fwd_result,
+		 show, "show");
+cmdline_parse_token_string_t cmd_show_fwd_fwd =
+	TOKEN_STRING_INITIALIZER
+		(struct cmd_show_fwd_result,
+		 fwd, "fwd");
+cmdline_parse_token_num_t cmd_show_fwd_port_id =
+	TOKEN_NUM_INITIALIZER
+		(struct cmd_show_fwd_result,
+		 port_id, UINT16);
+
+static void
+cmd_show_fwd_parsed(
+	void *parsed_result,
+	__attribute__((unused)) struct cmdline *cl,
+	__attribute__((unused)) void *data)
+{
+	struct cmd_show_fwd_result* res = parsed_result;
+	//res->port_id = htons(res->port_id);
+
+	int len = 0;
+	char buf[SW_CMD_BUFF_LEN] = {0};
+	sw_command_client_send_and_recv(SW_CMD_TYPE_SHOW_FWD, res, 
+									sizeof(struct cmd_show_fwd_result), 
+									buf, SW_CMD_BUFF_LEN, &len, SW_CMD_TIMEOUT);
+
+	printf("%s\n", buf);
+	
+	//if (NULL != sw_cmd_func_map.show_port)
+	//	sw_cmd_func_map.show_port(portid);
+}
+
+cmdline_parse_inst_t cmd_show_fwd = {
+	.f = cmd_show_fwd_parsed,
+	.data = NULL,
+	.help_str = "show fwd <port_id>",
+	.tokens = {
+		(void *)&cmd_show_fwd_show,
+		(void *)&cmd_show_fwd_fwd,
+		(void *)&cmd_show_fwd_port_id,
+		NULL,
+	},
+};
+
+//set fwd port-id len lend_mode syn_mode acl_mode off_mode
+///////////////////////////////////////
+struct cmd_set_fwd_result {
+	cmdline_fixed_string_t set;
+	cmdline_fixed_string_t fwd;
+	uint16_t port_id;
+	uint16_t delay_s;
+	uint16_t loopback;
+	uint16_t len;
+	uint16_t len_mode;
+	uint16_t syn_mode;
+	uint16_t acl_mode;
+	uint16_t off_mode;
+};
+
+cmdline_parse_token_string_t cmd_set_fwd_set =
+	TOKEN_STRING_INITIALIZER
+		(struct cmd_set_fwd_result,
+		 set, "set");
+cmdline_parse_token_string_t cmd_set_fwd_fwd =
+	TOKEN_STRING_INITIALIZER
+		(struct cmd_set_fwd_result,
+		 fwd, "fwd");
+cmdline_parse_token_num_t cmd_set_fwd_port_id =
+	TOKEN_NUM_INITIALIZER
+		(struct cmd_set_fwd_result,
+		 port_id, UINT16);
+cmdline_parse_token_num_t cmd_set_fwd_delay =
+	TOKEN_NUM_INITIALIZER
+		(struct cmd_set_fwd_result,
+		 delay_s, UINT16);
+cmdline_parse_token_num_t cmd_set_fwd_loopback =
+	TOKEN_NUM_INITIALIZER
+		(struct cmd_set_fwd_result,
+		 loopback, UINT16);
+cmdline_parse_token_num_t cmd_set_fwd_len =
+	TOKEN_NUM_INITIALIZER
+		(struct cmd_set_fwd_result,
+		 len, UINT16);
+cmdline_parse_token_num_t cmd_set_fwd_len_mode =
+	TOKEN_NUM_INITIALIZER
+		(struct cmd_set_fwd_result,
+		 len_mode, UINT16);
+cmdline_parse_token_num_t cmd_set_fwd_syn_mode =
+	TOKEN_NUM_INITIALIZER
+		(struct cmd_set_fwd_result,
+		 syn_mode, UINT16);
+cmdline_parse_token_num_t cmd_set_fwd_acl_mode =
+	TOKEN_NUM_INITIALIZER
+		(struct cmd_set_fwd_result,
+		 acl_mode, UINT16);
+cmdline_parse_token_num_t cmd_set_fwd_off_mode =
+	TOKEN_NUM_INITIALIZER
+		(struct cmd_set_fwd_result,
+		 off_mode, UINT16);
+
+
+static void
+cmd_set_fwd_parsed(
+	void *parsed_result,
+	__attribute__((unused)) struct cmdline *cl,
+	__attribute__((unused)) void *data)
+{
+	struct cmd_set_fwd_result* res = parsed_result;
+	//res->port_id = htons(res->port_id);
+
+	int len = 0;
+	char buf[SW_CMD_BUFF_LEN] = {0};
+	sw_command_client_send_and_recv(SW_CMD_TYPE_SET_FWD, res, 
+									sizeof(struct cmd_set_fwd_result), 
+									buf, SW_CMD_BUFF_LEN, &len, SW_CMD_TIMEOUT);
+
+	printf("%s\n", buf);
+	
+	//if (NULL != sw_cmd_func_map.show_port)
+	//	sw_cmd_func_map.show_port(portid);
+}
+
+cmdline_parse_inst_t cmd_set_fwd = {
+	.f = cmd_set_fwd_parsed,
+	.data = NULL,
+	.help_str = "set fwd <port_id> <delay_s> <loopback> <len> <len-mode> <syn-mode> <acl-mode> <off-mode>",
+	.tokens = {
+		(void *)&cmd_set_fwd_set,
+		(void *)&cmd_set_fwd_fwd,
+		(void *)&cmd_set_fwd_port_id,
+		(void *)&cmd_set_fwd_delay,
+		(void *)&cmd_set_fwd_loopback,
+		(void *)&cmd_set_fwd_len,
+		(void *)&cmd_set_fwd_len_mode,
+		(void *)&cmd_set_fwd_syn_mode,
+		(void *)&cmd_set_fwd_acl_mode,
+		(void *)&cmd_set_fwd_off_mode,
+		NULL,
+	},
+};
+
+////////////////////////////////////////////////////////////////
 /* kill self*/
 struct cmd_kill_self_result {
 	cmdline_fixed_string_t kill;
@@ -247,6 +399,8 @@ cmdline_parse_ctx_t vswitch_ctx[] = {
 //	(cmdline_parse_inst_t *)&cmd_set_acl,
 	(cmdline_parse_inst_t *)&cmd_show_acl,
 	(cmdline_parse_inst_t *)&cmd_show_offset,
+	(cmdline_parse_inst_t *)&cmd_show_fwd,
+	(cmdline_parse_inst_t *)&cmd_set_fwd,
 	NULL,
 };
 
@@ -275,6 +429,8 @@ typedef struct
 	SW_CMD_SET_ACL set_acl;
 	SW_CMD_SHOW_ACL show_acl;
 	SW_CMD_SHOW_OFFSET show_off;
+	SW_CMD_SHOW_FWD_RULE show_fwd;
+	SW_CMD_SET_FWD_RULE set_fwd;
 }SW_CMD_FUNC_MAP;
 
 SW_CMD_FUNC_MAP sw_cmd_func_map = {0};
@@ -431,6 +587,26 @@ int sw_command_register_show_port(SW_CMD_SHOW_PORT func)
 	return 0;
 }
 
+int sw_command_register_show_fwd_rule(SW_CMD_SHOW_FWD_RULE func)
+{
+	if (sw_cmd_func_map.show_fwd != NULL)
+		return -1;
+
+	sw_cmd_func_map.show_fwd = func;
+	return 0;
+
+}
+
+int sw_command_register_set_fwd_rule(SW_CMD_SET_FWD_RULE func)
+{
+	if (sw_cmd_func_map.set_fwd != NULL)
+		return -1;
+
+	sw_cmd_func_map.set_fwd = func;
+	return 0;
+
+}
+
 int sw_command_register_kill_self(SW_KILL_SELF func)
 {
 	if (sw_cmd_func_map.kill_self != NULL)
@@ -582,6 +758,20 @@ void sw_command_server_handle(int fd)
 			uint16_t portid = res->port_id;
 			if (NULL != sw_cmd_func_map.show_off)
 				resp_len = sw_cmd_func_map.show_off(portid, resp_buf, SW_CMD_BUFF_LEN);
+		}
+		else if (SW_CMD_TYPE_SHOW_FWD == ntohl(cmd_req->cmd_type))
+		{
+			struct cmd_show_fwd_result* res = (struct cmd_show_fwd_result*)(buf + sizeof(SW_CMD_REQUEST));
+			uint16_t portid = res->port_id;
+			if (NULL != sw_cmd_func_map.show_fwd)
+				resp_len = sw_cmd_func_map.show_fwd(portid, resp_buf, SW_CMD_BUFF_LEN);
+		}
+		else if (SW_CMD_TYPE_SET_FWD == ntohl(cmd_req->cmd_type))
+		{
+			struct cmd_set_fwd_result* res = (struct cmd_set_fwd_result*)(buf + sizeof(SW_CMD_REQUEST));		
+			if (NULL != sw_cmd_func_map.set_fwd)
+				resp_len = sw_cmd_func_map.set_fwd(res->port_id, res->delay_s, res->loopback, res->len, res->len_mode, res->syn_mode, 
+													res->acl_mode, res->off_mode, resp_buf, SW_CMD_BUFF_LEN);
 		}
 		
 		int send_len = resp_len + sizeof(SW_CMD_RESPONSE);

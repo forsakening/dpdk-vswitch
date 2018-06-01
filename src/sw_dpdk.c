@@ -75,6 +75,11 @@ static uint16_t nb_txd = RTE_TEST_TX_DESC_DEFAULT;
 static struct ether_addr sw_ports_eth_addr[SW_DPDK_MAX_PORT];
 static uint32_t sw_enabled_port_mask = 0;
 static volatile bool start_work = false;
+static uint32_t sw_port_delay_init[SW_DPDK_MAX_PORT] = {0};
+
+static uint32_t sw_port_need_update_rx[SW_DPDK_MAX_PORT] = {0};//以rx port作为索引
+static uint32_t sw_port_need_update_tx[SW_DPDK_MAX_PORT][SW_DPDK_MAX_TX_NUM] = {{0}};//以tx port作为索引
+
 static SW_PORT_PEER sw_port_peer[SW_DPDK_MAX_PORT] = {{0}}; // use rx port as the array id
 static SW_PORT_PEER_FWD_RULES sw_port_peer_fwd_rules[SW_DPDK_MAX_PORT] = {{0}}; // use rx port as the array id
 static uint64_t sw_used_core_mask_low = 1; // core 0 is used default  0 ~ 63
@@ -135,6 +140,13 @@ struct sw_dpdk_port_sw_stat{
 	uint64_t tcp_pkts[SW_DPDK_MAX_TX_NUM];
 	uint64_t udp_pkts[SW_DPDK_MAX_TX_NUM];
 
+	//pkts distribute
+	uint64_t len_less_128[SW_DPDK_MAX_TX_NUM];
+	uint64_t len_128_256[SW_DPDK_MAX_TX_NUM];
+	uint64_t len_256_512[SW_DPDK_MAX_TX_NUM];
+	uint64_t len_512_1024[SW_DPDK_MAX_TX_NUM];
+	uint64_t len_more_1024[SW_DPDK_MAX_TX_NUM];
+	
 	//tx -stat
 	uint64_t deque_tx_ring[SW_DPDK_MAX_TX_NUM];
 } __rte_cache_aligned;
@@ -285,8 +297,8 @@ static int sw_dpdk_setup_port_peer(uint16_t rx_port,
 	
 	sw_used_rx_port_mask |= (1 << rx_port);
 
-	SW_DPDK_Log_Info("sw_dpdk_setup_port_peer RxPort:%u TxPort:%u Delay:%u RxCore:%u TxCoreNum:%u \n",
-					rx_port, tx_port, delay_s, rx_core, tx_core_num);
+	SW_DPDK_Log_Info("sw_dpdk_setup_port_peer RxPort:%u TxPort:%u LoopBack:%u Delay:%u RxCore:%u TxCoreNum:%u \n",
+					rx_port, tx_port, loopback, delay_s, rx_core, tx_core_num);
 	
 	return 0;
 }
@@ -311,13 +323,17 @@ static int sw_dpdk_make_fwd_rules(void)
 
 		if (sw_port_peer_fwd_rules[i].acl_filter_mode == SW_FILTER_ACL_RXPORT)
 			sw_acl_filter_tx_port[i] = i;
-		else if (sw_port_peer_fwd_rules[i].acl_filter_mode == SW_FILTER_ACL_RXPORT)
+		else if (sw_port_peer_fwd_rules[i].acl_filter_mode == SW_FILTER_ACL_TXPORT)
 			sw_acl_filter_tx_port[i] = sw_port_peer[i].tx_port;
 
 		if (sw_port_peer_fwd_rules[i].offset_filter_mode == SW_FILTER_OFF_RXPORT)
 			sw_offset_filter_tx_port[i] = i;
 		else if (sw_port_peer_fwd_rules[i].offset_filter_mode == SW_FILTER_OFF_TXPORT)
 			sw_offset_filter_tx_port[i] = sw_port_peer[i].tx_port;
+
+		SW_DPDK_Log_Info("FWDRULE Port:%u-%u  len:%u  syn:%u  acl:%u off:%u \n", i, sw_port_peer[i].tx_port,
+			             sw_len_filter_tx_port[i], sw_syn_filter_tx_port[i], 
+			             sw_acl_filter_tx_port[i], sw_offset_filter_tx_port[i]);
 	}
 
 	return 0;
@@ -384,8 +400,8 @@ static int sw_dpdk_setup_fwd_rules(uint16_t rx_port, SW_PORT_PEER_FWD_RULES* fwd
 	memcpy(&sw_port_peer_fwd_rules[rx_port], fwd_rules, sizeof(SW_PORT_PEER_FWD_RULES));
 	memcpy(&sw_port_peer_fwd_rules[tx_port], fwd_rules, sizeof(SW_PORT_PEER_FWD_RULES));
 
-	SW_DPDK_Log_Info("sw_dpdk_setup_fwd_rules,RxPort:%u FilterLen:%u LenMode:%u SynMode:%u AclMode:%u OffMode:%u \n",
-		rx_port, sw_port_peer_fwd_rules[rx_port].len_filter_len, sw_port_peer_fwd_rules[rx_port].len_filter_mode, 
+	SW_DPDK_Log_Info("sw_dpdk_setup_fwd_rules,RxPort:%u LoopBack:%u FilterLen:%u LenMode:%u SynMode:%u AclMode:%u OffMode:%u \n",
+		rx_port, sw_port_peer[rx_port].loopback, sw_port_peer_fwd_rules[rx_port].len_filter_len, sw_port_peer_fwd_rules[rx_port].len_filter_mode, 
 		sw_port_peer_fwd_rules[rx_port].syn_filter_mode, sw_port_peer_fwd_rules[rx_port].acl_filter_mode, sw_port_peer_fwd_rules[rx_port].offset_filter_mode);
 
 	return 0;
@@ -891,6 +907,151 @@ static int sw_dpdk_kill_self(char* buf, int buf_len)
 	return len;
 }
 
+static int sw_dpdk_show_fwd(uint16_t portid, char* buf, int buf_len)
+{
+	int len = 0;
+	if ((sw_enabled_port_mask & (1 << portid)) == 0)
+	{
+		len += snprintf(buf+len, buf_len-len, "PortID:%u is not enabled, PortMask:%d!\n", portid, sw_enabled_port_mask);
+		return len;
+	}
+
+	if ((sw_used_rx_port_mask & (1 << portid)) == 0)
+	{
+		len += snprintf(buf+len, buf_len-len, "PortID:%u is not rx mode, PortMask:%d!\n", portid, sw_used_rx_port_mask);
+		return len;
+	}
+
+	len += snprintf(buf+len, buf_len-len, "FWD--Rule: \n");
+	len += snprintf(buf+len, buf_len-len, "    LoopBack: %u \n", sw_port_peer[portid].loopback);
+	len += snprintf(buf+len, buf_len-len, "    Delay   : %u \n", sw_port_peer[portid].delay_s);
+	len += snprintf(buf+len, buf_len-len, "    Len     : %u \n", sw_port_peer_fwd_rules[portid].len_filter_len);
+	len += snprintf(buf+len, buf_len-len, "    Len-Mode: %u \n", sw_port_peer_fwd_rules[portid].len_filter_mode);
+	len += snprintf(buf+len, buf_len-len, "    Syn-Mode: %u \n", sw_port_peer_fwd_rules[portid].syn_filter_mode);
+	len += snprintf(buf+len, buf_len-len, "    Acl-Mode: %u \n", sw_port_peer_fwd_rules[portid].acl_filter_mode);
+	len += snprintf(buf+len, buf_len-len, "    Off-Mode: %u \n", sw_port_peer_fwd_rules[portid].offset_filter_mode);
+
+	return len;
+}
+
+static int sw_dpdk_set_fwd(uint16_t portid,
+	                             uint16_t delay_s,
+	                             uint16_t loopback,
+	                             uint16_t filter_len,
+	                             uint16_t len_mode,
+	                             uint16_t syn_mode,
+	                             uint16_t acl_mode,
+	                             uint16_t off_mode,
+								 char* buf, int buf_len)
+{
+	int len = 0;
+	if ((sw_enabled_port_mask & (1 << portid)) == 0)
+	{
+		len += snprintf(buf+len, buf_len-len, "PortID:%u is not enabled, PortMask:%d!\n", portid, sw_enabled_port_mask);
+		return len;
+	}
+
+	if ((sw_used_rx_port_mask & (1 << portid)) == 0)
+	{
+		len += snprintf(buf+len, buf_len-len, "PortID:%u is not rx mode, PortMask:%d!\n", portid, sw_used_rx_port_mask);
+		return len;
+	}
+
+	if (delay_s > sw_port_delay_init[portid])
+	{
+		len += snprintf(buf+len, buf_len-len, "PortID:%u Init Delay is %u seconds!\n", portid, sw_port_delay_init[portid]);
+		return len;
+	}
+
+	if (loopback != 0 && loopback != 1)
+	{
+		len += snprintf(buf+len, buf_len-len, "loopback : %u  error \n", loopback);
+		return len;
+	}
+
+	if (loopback)
+	{
+		if (len_mode == SW_FILTER_LEN_RXPORT)
+		{
+			len += snprintf(buf+len, buf_len-len, "loopback, len-mode should not be 1 ... \n");
+			return len;
+		}
+
+		if (syn_mode == SW_FILTER_SYN_RXPORT)
+		{
+			len += snprintf(buf+len, buf_len-len, "loopback, syn-mode should not be 1 ... \n");
+			return len;
+		}
+
+		if (off_mode == SW_FILTER_OFF_RXPORT)
+		{
+			len += snprintf(buf+len, buf_len-len, "loopback, offset-mode should not be 1 ... \n");
+			return len;
+		}
+	}
+
+	if (filter_len <= SW_DPDK_PKT_LEN_MIN || SW_DPDK_PKT_LEN_MIN >= filter_len)
+	{
+		len += snprintf(buf+len, buf_len-len, "len : %u  error \n", filter_len);
+		return len;
+	}
+
+	if ( SW_FILTER_LEN_TXPORT < len_mode)
+	{
+		len += snprintf(buf+len, buf_len-len, "len-mode : %u  error \n", len_mode);
+		return len;
+	}
+
+	if (SW_FILTER_SYN_TXPORT < syn_mode)
+	{
+		len += snprintf(buf+len, buf_len-len, "syn-mode : %u  error \n", syn_mode);
+		return len;
+	}
+
+	if (SW_FILTER_ACL_TXPORT < acl_mode)
+	{
+		len += snprintf(buf+len, buf_len-len, "acl-mode : %u  error \n", acl_mode);
+		return len;
+	}
+	
+	if (SW_FILTER_OFF_TXPORT < off_mode)
+	{
+		len += snprintf(buf+len, buf_len-len, "off-mode : %u  error \n", off_mode);
+		return len;
+	}
+
+	//update , maybe need to lock
+	uint32_t tx_port = sw_port_peer[portid].tx_port;
+	sw_port_peer[portid].loopback = loopback;
+	sw_port_peer[portid].delay_s = delay_s;
+	sw_port_peer[tx_port].loopback = loopback;
+	sw_port_peer[tx_port].delay_s = delay_s;
+	
+	sw_port_peer_fwd_rules[portid].len_filter_len = filter_len;
+	sw_port_peer_fwd_rules[portid].len_filter_mode = len_mode;
+	sw_port_peer_fwd_rules[portid].syn_filter_mode = syn_mode;
+	sw_port_peer_fwd_rules[portid].acl_filter_mode = acl_mode;
+	sw_port_peer_fwd_rules[portid].offset_filter_mode = off_mode;
+	
+	len += snprintf(buf+len, buf_len-len, "FWD Rule: \n");
+	len += snprintf(buf+len, buf_len-len, "    LoopBack: %u \n", sw_port_peer[portid].loopback);
+	len += snprintf(buf+len, buf_len-len, "    Delay   : %u \n", sw_port_peer[portid].delay_s);
+	len += snprintf(buf+len, buf_len-len, "    Len     : %u \n", sw_port_peer_fwd_rules[portid].len_filter_len);
+	len += snprintf(buf+len, buf_len-len, "    Len-Mode: %u \n", sw_port_peer_fwd_rules[portid].len_filter_mode);
+	len += snprintf(buf+len, buf_len-len, "    Syn-Mode: %u \n", sw_port_peer_fwd_rules[portid].syn_filter_mode);
+	len += snprintf(buf+len, buf_len-len, "    Acl-Mode: %u \n", sw_port_peer_fwd_rules[portid].acl_filter_mode);
+	len += snprintf(buf+len, buf_len-len, "    Off-Mode: %u \n", sw_port_peer_fwd_rules[portid].offset_filter_mode);
+	len += snprintf(buf+len, buf_len-len, "\nSet Ok ! \n");
+
+	uint32_t i = 0;
+	sw_port_need_update_rx[portid] = 1;
+	for (; i < sw_port_peer[portid].tx_core_num; i++)
+		sw_port_need_update_tx[tx_port][i] = 1;
+		
+	return len;
+}
+
+
 static int sw_dpdk_port_stat(uint16_t portid, char* buf, int buf_len)
 {
 	int len = 0;
@@ -993,7 +1154,7 @@ static int sw_dpdk_port_stat(uint16_t portid, char* buf, int buf_len)
 		tx_num = sw_port_peer[portid].tx_core_num;
 		for (i = 0; i < tx_num; i++)
 		{
-			len += snprintf(buf+len, buf_len-len, "  [Ring%u]Deque-Cache-Ring:  %-18"PRIu64 "In-Delay-Ring:  %-18"PRIu64 "Out-Delay-Ring:  %-18"PRIu64 "Drop-Parse:  %-18"PRIu64 "Filter-Len:  %-18"PRIu64 "Filter-Syn:  %-18"PRIu64 "Filter-Acl:  %-18"PRIu64 "Filter-Offset:  %-18"PRIu64"\n", 
+			len += snprintf(buf+len, buf_len-len, "  [Ring%02u]Deque-Cache-Ring:  %-18"PRIu64 "In-Delay-Ring:  %-18"PRIu64 "Out-Delay-Ring:  %-18"PRIu64 "\n          Drop-Parse:  %-18"PRIu64 "\n          Filter-Len:  %-18"PRIu64 "\n          Filter-Syn:  %-18"PRIu64 "\n          Filter-Acl:  %-18"PRIu64 "\n          Filter-Offset:  %-18"PRIu64"\n", 
 							i, port_sw_stat[portid].deque_cache_ring[i], port_sw_stat[portid].enque_tx_ring[i],
 							port_sw_stat[portid].deque_tx_ring[i],
 							port_sw_stat[portid].drop_by_parsed[i], port_sw_stat[portid].filter_len[i], port_sw_stat[portid].filter_syn[i], 
@@ -1003,10 +1164,16 @@ static int sw_dpdk_port_stat(uint16_t portid, char* buf, int buf_len)
 		len += snprintf(buf+len, buf_len-len, "\n\nPackets Stat:\n\n");
 		for (i = 0; i < tx_num; i++)
 		{
-			len += snprintf(buf+len, buf_len-len, "  [Ring%u]VLAN:  %-18"PRIu64 "  MPLS:  %-18"PRIu64 "  IPv4:  %-18"PRIu64 "ICMP:  %-18"PRIu64 "TCP:  %-18"PRIu64 "UDP:  %-18"PRIu64"\n", 
+			len += snprintf(buf+len, buf_len-len, "  [Ring%02u]VLAN:  %-18"PRIu64 "  MPLS:  %-18"PRIu64 "  IPv4:  %-18"PRIu64 "ICMP:  %-18"PRIu64 "TCP:  %-18"PRIu64 "UDP:  %-18"PRIu64"\n", 
 							i, port_sw_stat[portid].vlan_pkts[i], port_sw_stat[portid].mpls_pkts[i],
 							port_sw_stat[portid].ipv4_pkts[i], port_sw_stat[portid].icmp_pkts[i],
 							port_sw_stat[portid].tcp_pkts[i], port_sw_stat[portid].udp_pkts[i]);
+
+			len += snprintf(buf+len, buf_len-len, "          Len_Less_128 :  %-18"PRIu64 "\n", port_sw_stat[portid].len_less_128[i]);
+			len += snprintf(buf+len, buf_len-len, "          Len_128_256  :  %-18"PRIu64 "\n", port_sw_stat[portid].len_128_256[i]);
+			len += snprintf(buf+len, buf_len-len, "          Len_256_512  :  %-18"PRIu64 "\n", port_sw_stat[portid].len_256_512[i]);
+			len += snprintf(buf+len, buf_len-len, "          Len_512_1024 :  %-18"PRIu64 "\n", port_sw_stat[portid].len_512_1024[i]);
+			len += snprintf(buf+len, buf_len-len, "          Len_More_1024:  %-18"PRIu64 "\n", port_sw_stat[portid].len_more_1024[i]);
 		}
 	}
 	
@@ -1042,6 +1209,7 @@ sw_dpdk_tx_pkts(uint16_t port_id, uint16_t queue_id,
 static void sw_dpdk_get_parse(struct rte_ring *cache_ring, struct rte_ring *tx_ring, uint16_t rx_port, uint16_t tx_port, uint16_t tx_queid, uint16_t loopback)
 {
 	int i;
+	uint16_t pkt_len = 0;
 	struct rte_mbuf *m;
 	struct rte_mbuf *m_bulk[MAX_PKT_BURST];
 	int num = rte_ring_dequeue_bulk(cache_ring, (void **)&m_bulk, MAX_PKT_BURST, NULL);
@@ -1050,9 +1218,14 @@ static void sw_dpdk_get_parse(struct rte_ring *cache_ring, struct rte_ring *tx_r
 
 	port_sw_stat[tx_port].deque_cache_ring[tx_queid] += num;
 
-	if (loopback)
-		sw_dpdk_tx_pkts(rx_port, tx_queid, m_bulk, num);
+	SW_DPDK_Log_Debug("PortID:%u-%u get %d num pkts ....\n", rx_port, tx_port, num);
 
+	if (loopback)
+	{
+		sw_dpdk_tx_pkts(rx_port, tx_queid, m_bulk, num);
+		SW_DPDK_Log_Debug("Loopback, PortID:%u-%u send %d num pkts ok ....\n", rx_port, tx_port, num);
+	}
+	
 	uint16_t len_filter_mode = sw_port_peer_fwd_rules[rx_port].len_filter_mode;
 	uint16_t syn_filter_mode = sw_port_peer_fwd_rules[rx_port].syn_filter_mode;
 	uint16_t acl_filter_mode = sw_port_peer_fwd_rules[rx_port].acl_filter_mode;
@@ -1107,6 +1280,7 @@ non_len_filter:
 		m = m_non_len[i];
 		pkt_info.peth_pkt = rte_pktmbuf_mtod(m, uint8_t *);
 		pkt_info.pkt_len = rte_pktmbuf_pkt_len(m);
+		pkt_len = rte_pktmbuf_pkt_len(m);;
 		if (SW_PARSE_OK == sw_pkt_get_hdr(&pkt_info))
 		{
 			//统计信息
@@ -1127,6 +1301,18 @@ non_len_filter:
 
 			if (pkt_info.proto == PKT_IPPROTO_UDP)
 				port_sw_stat[tx_port].udp_pkts[tx_queid]++;
+
+			//统计长度分布
+			if (pkt_len <= 128)
+				port_sw_stat[tx_port].len_less_128[tx_queid]++;
+			else if (pkt_len > 128 && pkt_len <= 256)
+				port_sw_stat[tx_port].len_128_256[tx_queid]++;
+			else if (pkt_len > 256 && pkt_len <= 512)
+				port_sw_stat[tx_port].len_256_512[tx_queid]++;
+			else if (pkt_len > 512 && pkt_len <= 1024)
+				port_sw_stat[tx_port].len_512_1024[tx_queid]++;
+			else if (pkt_len > 1024)
+				port_sw_stat[tx_port].len_more_1024[tx_queid]++;
 		}
 		else
 		{
@@ -1145,6 +1331,8 @@ non_len_filter:
 			{
 				port_sw_stat[tx_port].filter_syn[tx_queid] ++;
 				sw_dpdk_tx_pkts(syn_filter_tx_port, tx_queid, &m, 1);
+
+				SW_DPDK_Log_Debug("Syn PortID:%u-%u send %d num pkts ok to prot:%u ....\n", rx_port, tx_port, 1, syn_filter_tx_port);
 				continue;
 			}
 		}
@@ -1153,10 +1341,12 @@ non_len_filter:
 		//acl 过滤
 		if (acl_filter_mode)
 		{
-			if (0 == sw_filter_port(rx_port, &pkt_info))
+			if (0 == sw_filter_port(rx_port, tx_queid, &pkt_info))
 			{
 				port_sw_stat[tx_port].filter_acl[tx_queid]++;
 				sw_dpdk_tx_pkts(acl_filter_tx_port, tx_queid, &m, 1);
+
+				SW_DPDK_Log_Debug("Acl PortID:%u-%u send %d num pkts ok to prot:%u ....\n", rx_port, tx_port, 1, acl_filter_tx_port);
 				continue;
 			}
 		}
@@ -1169,6 +1359,8 @@ non_len_filter:
 			{
 				port_sw_stat[tx_port].filter_offset[tx_queid]++;
 				sw_dpdk_tx_pkts(offset_filter_tx_port, tx_queid, &m, 1);
+
+				SW_DPDK_Log_Debug("Offset PortID:%u-%u send %d num pkts ok to prot:%u ....\n", rx_port, tx_port, 1, offset_filter_tx_port);
 				continue;
 			}	
 		}
@@ -1260,6 +1452,7 @@ sw_dpdk_main_loop(void *arg)
 		delay = sw_port_peer[rx_port].delay_s;
 		rx_mode = 1;
 		loopback = sw_port_peer[rx_port].loopback;
+		tx_port = sw_port_peer[rx_port].tx_port;
 	}
 	else if (core_mode == SW_CORE_TX)
 	{
@@ -1285,7 +1478,53 @@ sw_dpdk_main_loop(void *arg)
 
 	prev_tsc = 0;
 	uint16_t hash_cnt = 0;
+	uint16_t check_cnt = 0;
 	while (!force_quit) {
+
+		//隔固定的时间检查更新配置
+		if (check_cnt++ % 4096 == 0)
+		{
+			check_cnt = 0;
+			if (rx_mode && sw_port_need_update_rx[rx_port])
+			{
+				sw_port_need_update_rx[rx_port] = 0;
+			
+				delay = sw_port_peer[rx_port].delay_s;
+				loopback = sw_port_peer[rx_port].loopback;
+
+				SW_DPDK_Log_Info("Core %u Start to update conf delay:%u, loopback:%u ... \n", lcore_id, delay, loopback);
+
+				//放在rx核心上操作，避免tx多核心的同时处理	
+				if (sw_port_peer_fwd_rules[rx_port].len_filter_mode == SW_FILTER_LEN_RXPORT)
+					sw_len_filter_tx_port[rx_port] = rx_port;
+				else if (sw_port_peer_fwd_rules[rx_port].len_filter_mode == SW_FILTER_LEN_TXPORT)
+					sw_len_filter_tx_port[rx_port] = tx_port;
+				
+				if (sw_port_peer_fwd_rules[rx_port].syn_filter_mode == SW_FILTER_SYN_RXPORT)
+					sw_syn_filter_tx_port[rx_port] = rx_port;
+				else if (sw_port_peer_fwd_rules[rx_port].syn_filter_mode == SW_FILTER_SYN_TXPORT)
+					sw_syn_filter_tx_port[rx_port] = tx_port;
+
+				if (sw_port_peer_fwd_rules[rx_port].acl_filter_mode == SW_FILTER_ACL_RXPORT)
+					sw_acl_filter_tx_port[rx_port] = rx_port;
+				else if (sw_port_peer_fwd_rules[rx_port].acl_filter_mode == SW_FILTER_ACL_TXPORT)
+					sw_acl_filter_tx_port[rx_port] = tx_port;
+
+				if (sw_port_peer_fwd_rules[rx_port].offset_filter_mode == SW_FILTER_OFF_RXPORT)
+					sw_offset_filter_tx_port[rx_port] = rx_port;
+				else if (sw_port_peer_fwd_rules[rx_port].offset_filter_mode == SW_FILTER_OFF_TXPORT)
+					sw_offset_filter_tx_port[rx_port] = tx_port;
+			}
+
+			if (tx_mode && sw_port_need_update_tx[tx_port][tx_queid])
+			{
+				sw_port_need_update_tx[tx_port][tx_queid] = 0;
+			
+				delay = sw_port_peer[tx_port].delay_s;
+				loopback = sw_port_peer[tx_port].loopback;
+				SW_DPDK_Log_Info("Core %u Start to update conf delay:%u, loopback:%u ... \n", lcore_id, delay, loopback);
+			}
+		}
 
 		cur_tsc = rte_rdtsc();
 		diff_tsc = cur_tsc - prev_tsc;
@@ -1335,8 +1574,10 @@ sw_dpdk_main_loop(void *arg)
 				port_sw_stat[rx_port].drop_by_no_ring[hash_id]++;
 			}
 			else
+			{
 				port_sw_stat[rx_port].enque_ring[hash_id] += nb_rx;
-
+				SW_DPDK_Log_Debug("recevice %u pkts from rx_port:%u and Push to Ring ...\n", nb_rx, rx_port);
+			}
 			//只有在回还的情况下rx port才会发包
 			//if (loopback)
 			//{
@@ -1511,8 +1752,63 @@ int sw_dpdk_start(void)
 			sleep(1);
 			break;
 		}
+
+	#if 1
 		sleep(1);
 		sw_running_seconds++;
+
+	#else
+		//for dynamic test
+		i++;
+		sleep(5);
+		char off_err[64] = {0};
+		char test_rule[128] = {0};
+		//sprintf(test_rule, "%s_%d", "0,L4,20,GET,string,HTTP_GET", i);
+		//ret = sw_offset_dynamic_add_rules(test_rule, off_err, sizeof(off_err));
+		sprintf(test_rule, "%s", "0,0.0.0.0/0,0.0.0.0/0,0:65535,0:65535,0x0/0x0");
+		ret = sw_filter_dynamic_add_rules(test_rule, off_err, sizeof(off_err));
+		if (ret != 0)
+		{
+			printf("Add %s error !\n", test_rule);
+		}
+		else
+		{
+			printf("Add %s ok !\n", test_rule);
+		}
+
+		sleep(10);
+
+		memset(off_err, 0, sizeof(off_err));
+		memset(test_rule, 0, sizeof(test_rule));
+		//sprintf(test_rule, "%s_%d", "0,L4,20,GET,string,HTTP_GET_P", i);
+		//ret = sw_offset_dynamic_add_rules(test_rule, off_err, sizeof(off_err));
+		sprintf(test_rule, "%s", "0,0.0.0.0/0,0.0.0.0/0,0:65535,0:65535,0x0/0x0");
+		ret = sw_filter_dynamic_add_rules(test_rule, off_err, sizeof(off_err));
+		if (ret != 0)
+		{
+			printf("Add %s error !\n", test_rule);
+		}
+		else
+		{
+			printf("Add %s ok !\n", test_rule);
+		}
+
+		sleep(10);
+
+		memset(off_err, 0, sizeof(off_err));
+		//ret = sw_offset_dynamic_del_rule(0, SW_OFFSET_L4, 0, off_err, sizeof(off_err));
+		ret = sw_filter_dynamic_del_rule(0, 1, off_err, sizeof(off_err));
+		if (ret != 0)
+		{
+			printf("delete %d error !\n", 1);
+		}
+		else
+		{
+			printf("Delete %d ok !\n", 1);
+		} 
+
+		sleep(10);
+	#endif
 	}
 	
 	for (portid = 0; portid < sw_dpdk_total_port; portid++) {
@@ -1542,6 +1838,8 @@ int sw_dpdk_init(char* conf_path, uint32_t dpdk_pps)
 	sw_command_register_show_core_mode(sw_dpdk_core_map);
 	sw_command_register_kill_self(sw_dpdk_kill_self);
 	sw_command_register_show_port(sw_dpdk_port_stat);
+	sw_command_register_show_fwd_rule(sw_dpdk_show_fwd);
+	sw_command_register_set_fwd_rule(sw_dpdk_set_fwd);
 	sw_command_init(CMD_ROLE_SERVER);
 
 	//1)初始化配置
@@ -1573,6 +1871,8 @@ int sw_dpdk_init(char* conf_path, uint32_t dpdk_pps)
 				SW_DPDK_Log_Error("Setup Port %u peer error\n", i);
 				return -1;
 			}
+
+			sw_port_delay_init[i] = tmp_conf[i].delay_s;
 		}
 
 		if (sw_used_port_mask == 0)

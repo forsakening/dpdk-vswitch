@@ -11,6 +11,9 @@
 #define SW_DPDK_Log_Error(fmt,...) printf("\033[0;32;31m[SWDPDK ERROR] \033[m"fmt, ##__VA_ARGS__);
 #define SW_DPDK_Log_Info(fmt,...) printf("\033[0;32;32m[SWDPDK INFO] \033[m"fmt, ##__VA_ARGS__);
 
+//#define SW_DPDK_Log_Debug(fmt,...) printf("\033[0;32;32m[SWDPDK DBG] \033[m"fmt, ##__VA_ARGS__);
+#define SW_DPDK_Log_Debug(fmt,...)
+
 #define SW_DPDK_DEFAULT_LEN_FILTER 68
 #define SW_DPDK_PKT_LEN_MIN 60
 #define SW_DPDK_PKT_LEN_MAX 1508

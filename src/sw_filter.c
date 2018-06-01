@@ -44,195 +44,8 @@
 #include "sw_filter.h"
 
 //#define SW_FILTER_DEBUG 1
-
-#if 0
-/* set acl */
-struct cmd_set_acl_result {
-	cmdline_fixed_string_t acl;
-	cmdline_fixed_string_t port;
-	uint16_t port_id;
-	cmdline_ipaddr_t sip_mask;
-	cmdline_ipaddr_t dip_mask;
-	cmdline_portlist_t sport_range;
-	cmdline_portlist_t dport_range;
-	cmdline_fixed_string_t proto;
-};
-
-cmdline_parse_token_string_t cmd_set_acl_acl =
-	TOKEN_STRING_INITIALIZER
-		(struct cmd_set_acl_result,
-		 acl, "acl");
-cmdline_parse_token_string_t cmd_set_acl_port =
-	TOKEN_STRING_INITIALIZER
-		(struct cmd_set_acl_result,
-		 port, "port");
-cmdline_parse_token_num_t cmd_set_acl_portid =
-	TOKEN_NUM_INITIALIZER
-		(struct cmd_set_acl_result,
-		 port_id, UINT16);
-cmdline_parse_token_ipaddr_t cmd_set_acl_sip_mask =
-	TOKEN_IPV4NET_INITIALIZER
-		(struct cmd_set_acl_result, sip_mask);
-cmdline_parse_token_ipaddr_t cmd_set_acl_dip_mask =
-	TOKEN_IPV4NET_INITIALIZER
- 		(struct cmd_set_acl_result, dip_mask);
-cmdline_parse_token_portlist_t cmd_set_acl_sport_range =
-	TOKEN_PORTLIST_INITIALIZER
-		(struct cmd_set_acl_result, sport_range);
-cmdline_parse_token_portlist_t cmd_set_acl_dport_range =
-	TOKEN_PORTLIST_INITIALIZER
-		(struct cmd_set_acl_result, dport_range);
-cmdline_parse_token_string_t cmd_set_acl_proto =
-	TOKEN_STRING_INITIALIZER
-		(struct cmd_set_acl_result,
-		 proto, "ip#tcp#udp");
-
-static void
-cmd_set_acl_parsed(
-	void *parsed_result,
-	__attribute__((unused)) struct cmdline *cl,
-	__attribute__((unused)) void *data)
-{
-	struct cmd_set_acl_result* res = parsed_result;
-
-	int len = 0;
-	char buf[SW_CMD_BUFF_LEN] = {0};
-	sw_command_client_send_and_recv(SW_CMD_TYPE_SET_ACL, res, 
-									sizeof(struct cmd_set_acl_result), 
-									buf, SW_CMD_BUFF_LEN, &len, SW_CMD_TIMEOUT);
-
-	printf("%s\n", buf);
-}
-
-
-cmdline_parse_inst_t cmd_set_acl = {
-	.f = cmd_set_acl_parsed,
-	.data = NULL,
-	.help_str = "acl port <port_id> sip/mask dip/mask sport-range dport-range ip/tcp/udp",
-	.tokens = {
-		(void *)&cmd_set_acl_acl,
-		(void *)&cmd_set_acl_port,
-		(void *)&cmd_set_acl_portid,
-		(void *)&cmd_set_acl_sip_mask,
-		(void *)&cmd_set_acl_dip_mask,
-		(void *)&cmd_set_acl_sport_range,
-		(void *)&cmd_set_acl_dport_range,
-		(void *)&cmd_set_acl_proto,
-		NULL,
-	},
-};
-
-/***********************start of ACL part******************************/
-enum {
-	PROTO_FIELD_IPV4,
-	SRC_FIELD_IPV4,
-	DST_FIELD_IPV4,
-	SRCP_FIELD_IPV4,
-	DSTP_FIELD_IPV4,
-	NUM_FIELDS_IPV4
-};
-
-struct rte_acl_field_def sw_filter_ipv4_defs[NUM_FIELDS_IPV4] = {
-	{
-		.type = RTE_ACL_FIELD_TYPE_BITMASK,
-		.size = sizeof(uint8_t),
-		.field_index = PROTO_FIELD_IPV4,
-		.input_index = RTE_ACL_IPV4VLAN_PROTO,
-		.offset = 0,
-	},
-	{
-		.type = RTE_ACL_FIELD_TYPE_MASK,
-		.size = sizeof(uint32_t),
-		.field_index = SRC_FIELD_IPV4,
-		.input_index = RTE_ACL_IPV4VLAN_SRC,
-		.offset = offsetof(struct ipv4_hdr, src_addr) -
-			offsetof(struct ipv4_hdr, next_proto_id),
-	},
-	{
-		.type = RTE_ACL_FIELD_TYPE_MASK,
-		.size = sizeof(uint32_t),
-		.field_index = DST_FIELD_IPV4,
-		.input_index = RTE_ACL_IPV4VLAN_DST,
-		.offset = offsetof(struct ipv4_hdr, dst_addr) -
-			offsetof(struct ipv4_hdr, next_proto_id),
-	},
-	{
-		.type = RTE_ACL_FIELD_TYPE_RANGE,
-		.size = sizeof(uint16_t),
-		.field_index = SRCP_FIELD_IPV4,
-		.input_index = RTE_ACL_IPV4VLAN_PORTS,
-		.offset = sizeof(struct ipv4_hdr) -
-			offsetof(struct ipv4_hdr, next_proto_id),
-	},
-	{
-		.type = RTE_ACL_FIELD_TYPE_RANGE,
-		.size = sizeof(uint16_t),
-		.field_index = DSTP_FIELD_IPV4,
-		.input_index = RTE_ACL_IPV4VLAN_PORTS,
-		.offset = sizeof(struct ipv4_hdr) -
-			offsetof(struct ipv4_hdr, next_proto_id) +
-			sizeof(uint16_t),
-	},
-};
-
-enum {
-	SW_FILTER_ACL_INUSE = 0,
-	SW_FILTER_ACL_TMP,
-	SW_FILTER_ACL_ROLENUM
-};
-
-static struct rte_acl_ctx *sw_acl_context[SW_DPDK_MAX_PORT][SW_FILTER_ACL_ROLENUM] = {0};
-
-static int sw_filter_acl_init(uint16_t port_id)
-{
-	//创建port的主备acl ctx
-	int i = 0;
-	for (; i < SW_FILTER_ACL_ROLENUM; i++)
-	{
-		char name[32] = {0};
-		snprintf(name, sizeof(name), SW_FILTER_ACL_NAME"%02u-%s", port_id, i==SW_FILTER_ACL_INUSE ? "inuse" : "temp");
-		struct rte_acl_param acl_param;
-		acl_param.name = name;
-		acl_param.socket_id = -1; // to do
-		acl_param.rule_size = RTE_ACL_RULE_SZ(RTE_DIM(sw_filter_ipv4_defs));
-		acl_param.max_rule_num = SW_FILTER_ACL_NUM;
-
-		if ((sw_acl_context[port_id][i] = rte_acl_create(&acl_param)) == NULL)
-		{
-			SW_FILTER_Log_Error("Create acl error,port id:%u role:%s!\n", port_id, i==SW_FILTER_ACL_INUSE ? "inuse" : "temp");
-			return -1;
-		}
-
-		if (0 != rte_acl_set_ctx_classify(sw_acl_context[port_id][i], RTE_ACL_CLASSIFY_SCALAR))
-		{
-			SW_FILTER_Log_Error("Set acl classify error,port id:%u role:%s!\n", port_id, i==SW_FILTER_ACL_INUSE ? "inuse" : "temp");
-			return -1;
-		}
-	}	
-}
-
-/***********************end of ACL part******************************/
-
-static int sw_filter_handle(void* cmd, char* buf, int buf_len)
-{
-	int len = 0;
-	struct cmd_set_acl_result *acl_cmd = (struct cmd_set_acl_result *)cmd;
-	//check cmd	
-	uint16_t portid = acl_cmd->port_id;
-	uint32_t port_mask = sw_dpdk_enabled_port_mask();
-	if ((port_mask & (1 << portid)) == 0)
-	{
-		len += snprintf(buf+len, buf_len-len, "PortID:%u is not enabled, PortMask:%u!\n", portid, port_mask);
-		return len;
-	}
-
-	cmdline_ipaddr_t sip_mask = acl_cmd->sip_mask;
-	
-	len += snprintf(buf+len, buf_len-len,"\n");
-
-	return len;
-}
-#endif
+#define SW_FILTER_UNUSED(x) UNUSED_ ## x __attribute__((unused))
+#define SW_FILTER_ADD(a)	__sync_fetch_and_add(&(a),1)
 
 /***********************start of ACL part******************************/
 #define MAX_ACL_RULE_NUM	10000
@@ -366,10 +179,42 @@ enum
 RTE_ACL_RULE_DEF(acl4_rule, RTE_DIM(ipv4_defs));
 
 const char sw_acl_port_delim[] = ":";
+
+enum
+{
+	SW_FILTER_MATCH_USED_NO = -1,
+	SW_FILTER_MATCH_USED_0 = 0,
+	SW_FILTER_MATCH_USED_1,	
+};
+static int sw_filter_match_used = -1;
+static int sw_filter_cur_use[SW_DPDK_MAX_PORT][MAX_ACL_RULE_NUM] = {{0}};
+
+//单用户
+static int sw_filter_single_user = 0;
+
+typedef struct 
+{
+	uint32_t used;
+	uint32_t line_num;
+	uint64_t match;
+}SW_FILTER_ACL_INFO;
+
+//规则0
+//need to free
 static struct rte_acl_ctx *sw_filter_acl_ctx[SW_DPDK_MAX_PORT] = {0};
+
+//static memory
 static struct rte_acl_rule *sw_filter_acl_rules_base[SW_DPDK_MAX_PORT] = {0};
-static uint64_t sw_filter_acl_stat[SW_DPDK_MAX_PORT][MAX_ACL_RULE_NUM] = {{0}};
+
+//need to reset
+static SW_FILTER_ACL_INFO sw_filter_acl_stat[SW_DPDK_MAX_PORT][MAX_ACL_RULE_NUM] = {{{0}}};
 static uint32_t sw_filter_acl_num[SW_DPDK_MAX_PORT] = {0};
+
+//规则1
+static struct rte_acl_ctx *sw_filter_acl_ctx_1[SW_DPDK_MAX_PORT] = {0};
+static struct rte_acl_rule *sw_filter_acl_rules_base_1[SW_DPDK_MAX_PORT] = {0};
+static SW_FILTER_ACL_INFO sw_filter_acl_stat_1[SW_DPDK_MAX_PORT][MAX_ACL_RULE_NUM] = {{{0}}};
+static uint32_t sw_filter_acl_num_1[SW_DPDK_MAX_PORT] = {0};
 
 static inline void
 print_one_ipv4_rule(struct acl4_rule *rule, int extra)
@@ -548,8 +393,10 @@ sw_filter_parse_ipv4_rule(char *str, struct acl4_rule *v)
 	return 0;
 }
 
+////////////////////////////////////////////////////////////////////////////////
+
 static int
-sw_filter_add_rules(const char *rule_path,
+sw_filter_add_rules_1(const char *rule_path,
 				uint16_t port_id,
 				struct rte_acl_rule **pacl_base,
 				unsigned int *pacl_num, uint32_t rule_size)
@@ -607,15 +454,19 @@ sw_filter_add_rules(const char *rule_path,
 		return -1;
 	}
 
-	acl_rules = calloc(acl_num, rule_size);
+	//acl_rules = calloc(acl_num, rule_size);
+	acl_rules = (uint8_t *)sw_filter_acl_rules_base_1[port_id];
 	if (NULL == acl_rules)
 	{
-		SW_FILTER_Log_Error("calloc %u error! \n", acl_num);
+		SW_FILTER_Log_Error("ACL-conf1 acl_rules %u error! \n", acl_num);
 		fclose(fh);
 		return -1;
 	}
-	
+
+	uint32_t line_num = 0;
 	while ((fgets(buff, 256, fh) != NULL)) {
+		line_num++;
+		
 		char port_s[32] = {0};
 		char sip_s[32] = {0};
 		char dip_s[32] = {0};
@@ -650,6 +501,9 @@ sw_filter_add_rules(const char *rule_path,
 		next->data.userdata = total_num;
 
 		print_one_ipv4_rule(next, 1);
+
+		sw_filter_acl_stat_1[port_id][total_num].line_num = line_num;
+		sw_filter_acl_stat_1[port_id][total_num].used = 1;
 	}
 
 _out:
@@ -662,7 +516,7 @@ _out:
 }
 
 static struct rte_acl_ctx*
-sw_filter_setup_acl(struct rte_acl_rule *acl_base, 
+sw_filter_setup_acl_1(struct rte_acl_rule *acl_base, 
 							unsigned int acl_num,
 							uint16_t port_id,
 							int socketid)
@@ -674,7 +528,7 @@ sw_filter_setup_acl(struct rte_acl_rule *acl_base,
 	int dim = RTE_DIM(ipv4_defs);
 
 	/* Create ACL contexts */
-	snprintf(name, sizeof(name), "%s-%02u", "PortAcl", port_id);
+	snprintf(name, sizeof(name), "%s-%02u", "PortAcl1", port_id);
 
 	acl_param.name = name;
 	acl_param.socket_id = socketid;
@@ -717,12 +571,30 @@ sw_filter_setup_acl(struct rte_acl_rule *acl_base,
 }
 
 static int
-sw_filter_acl_init(const char *path)
+sw_filter_acl_init_1(const char *path)
 {
-	uint32_t i;
+	uint32_t i,j;
 	int socketid;
 	struct rte_acl_rule *acl_base_ipv4;
 	unsigned int acl_num_ipv4 = 0;
+
+	//释放资源
+	for (i = 0; i < SW_DPDK_MAX_PORT; i++)
+	{
+		if (sw_filter_acl_num_1[i] > 0)
+		{
+			SW_FILTER_Log_Info("ACL-INIT1 PortID:%u start to reset resource ...\n", i);
+
+			if (NULL != sw_filter_acl_ctx_1[i])
+			{
+				rte_acl_free(sw_filter_acl_ctx_1[i]);
+				sw_filter_acl_ctx_1[i] = NULL;
+			}
+		
+			memset(sw_filter_acl_stat_1[i], 0, sizeof(sw_filter_acl_stat_1[i]) / sizeof(sw_filter_acl_stat_1[i][0]));
+			sw_filter_acl_num_1[i] = 0;
+		}
+	}
 
 	uint32_t rx_port_mask = sw_dpdk_enabled_rx_port_mask();
 	for (i = 0; i < SW_DPDK_MAX_PORT; i++)
@@ -735,7 +607,264 @@ sw_filter_acl_init(const char *path)
 		else
 			SW_FILTER_Log_Info("PortID:%u is rx mode, start to add acl ...\n", i);
 
-		if (sw_filter_add_rules(path, i, &acl_base_ipv4, &acl_num_ipv4, sizeof(struct acl4_rule)) < 0)
+		if (sw_filter_add_rules_1(path, i, &acl_base_ipv4, &acl_num_ipv4, sizeof(struct acl4_rule)) < 0)
+		{
+			SW_FILTER_Log_Error("PortID:%u add rules error!\n", i);
+			return -1;
+		}
+
+		if (acl_num_ipv4 > 0)
+		{
+			sw_filter_acl_num_1[i] = acl_num_ipv4;
+			//sw_filter_acl_rules_base_1[i] = acl_base_ipv4;
+			socketid = sw_dpdk_get_port_socket(i);
+			sw_filter_acl_ctx_1[i] = sw_filter_setup_acl_1(acl_base_ipv4, acl_num_ipv4, i, socketid);
+			if (NULL == sw_filter_acl_ctx_1[i])
+			{
+				SW_FILTER_Log_Error("PortID:%u add set acl error!\n", i);
+				return -1;
+			}
+		}
+	}
+
+	SW_FILTER_Log_Info("\n\nACL-Conf1 ok, start to wait changing to SW_FILTER_MATCH_USED_1 !\n");
+
+	sw_filter_match_used = SW_FILTER_MATCH_USED_1;
+	//wait for the thread using rule 0 to exit
+	for (i = 0; i < SW_DPDK_MAX_PORT; i++)
+	{
+		for (j = 0; j < SW_DPDK_MAX_TX_NUM; j++)
+		{
+			do
+			{	
+				usleep(1000);
+			}
+			while (sw_filter_cur_use[i][j] == SW_FILTER_MATCH_USED_0);		
+		}
+	}
+
+	SW_FILTER_Log_Info("ACL-Conf1 Set SW_FILTER_MATCH_USED_1 ok!\n ");
+
+	return 0;
+}
+
+
+////////////////////////////////////////////////////////////////////////////////
+static int
+sw_filter_add_rules_0(const char *rule_path,
+				uint16_t port_id,
+				struct rte_acl_rule **pacl_base,
+				unsigned int *pacl_num, uint32_t rule_size)
+{
+	uint8_t *acl_rules = NULL;
+	struct acl4_rule *next;
+	unsigned int acl_num = 0, total_num = 0;
+	char buff[256];
+	FILE *fh = fopen(rule_path, "rb");
+	int val,ret;
+
+	if (fh == NULL)
+	{
+		SW_FILTER_Log_Error("%s: Open %s failed\n", __func__, rule_path);
+		return -1;
+	}
+	
+	//获得满足条件的port
+	while ((fgets(buff, 256, fh) != NULL)) {
+		char port_s[32] = {0};
+		char sip_s[32] = {0};
+		char dip_s[32] = {0};
+		char sport_s[32] = {0};
+		char dport_s[32] = {0};
+		char proto_s[32] = {0};
+		if (6 != (ret = sscanf(buff, "%[^,],%[^,],%[^,],%[^,],%[^,],%[^\n]", 
+					port_s,sip_s,dip_s,sport_s,dport_s,proto_s)))
+		{
+			SW_FILTER_Log_Error("sscanf error,ret:%d, %s-%s-%s-%s-%s-%s \n", ret,
+					port_s,sip_s,dip_s,sport_s,dport_s,proto_s);
+			fclose(fh);
+			return -1;
+		}
+		else
+		{
+			SW_FILTER_Log_Info("sscanf ok, %s-%s-%s-%s-%s-%s \n", port_s,sip_s,dip_s,sport_s,dport_s,proto_s);
+		}
+
+		if (port_s[0] == '#' || port_s[0] == '\r' || port_s[0] == '\n')
+			continue;
+
+		if (atoi(port_s) != port_id)
+			continue;
+
+		acl_num++;
+	}
+
+	if (acl_num == 0)
+		goto _out;
+
+	val = fseek(fh, 0, SEEK_SET);
+	if (val < 0) {
+		SW_FILTER_Log_Error("fseek to set error, ret = %d \n", val);
+		fclose(fh);
+		return -1;
+	}
+
+	//acl_rules = calloc(acl_num, rule_size);
+	acl_rules = (uint8_t *)sw_filter_acl_rules_base[port_id];
+	if (NULL == acl_rules)
+	{
+		SW_FILTER_Log_Error("acl_rules %u error! \n", acl_num);
+		fclose(fh);
+		return -1;
+	}
+
+	uint32_t line_num = 0;
+	while ((fgets(buff, 256, fh) != NULL)) {
+
+		line_num++;
+		
+		char port_s[32] = {0};
+		char sip_s[32] = {0};
+		char dip_s[32] = {0};
+		char sport_s[32] = {0};
+		char dport_s[32] = {0};
+		char proto_s[32] = {0};
+		if (6 != (ret = sscanf(buff, "%[^,],%[^,],%[^,],%[^,],%[^,],%[^\n]", 
+					port_s,sip_s,dip_s,sport_s,dport_s,proto_s)))
+		{
+			SW_FILTER_Log_Error("sscanf error,ret:%d, %s-%s-%s-%s-%s-%s \n", ret,
+					port_s,sip_s,dip_s,sport_s,dport_s,proto_s);
+			fclose(fh);
+			return -1;
+		}
+
+		if (atoi(port_s) != port_id)
+			continue;
+		
+		next = (struct acl4_rule *)(acl_rules + total_num * rule_size);
+		char *_rule = strstr(buff, ",") + 1;
+		if (0 > sw_filter_parse_ipv4_rule(_rule, next))
+		{
+			SW_FILTER_Log_Error("sw_filter_parse_ipv4_rule error, check the config please !\n");
+			return -1;
+		}
+		//else
+		//	SW_FILTER_Log_Info("PortID:%u parse ok:[%s] \n", port_id, buff);
+
+		total_num++;
+		next->data.priority = RTE_ACL_MAX_PRIORITY - total_num;
+		next->data.category_mask = 0x1;
+		next->data.userdata = total_num;
+
+		print_one_ipv4_rule(next, 1);
+
+		sw_filter_acl_stat[port_id][total_num].line_num = line_num;
+		sw_filter_acl_stat[port_id][total_num].used = 1;
+	}
+
+_out:
+	fclose(fh);
+	fh = NULL;
+	
+	*pacl_base = (struct rte_acl_rule *)acl_rules;
+	*pacl_num = total_num;
+	return 0;
+}
+
+
+static struct rte_acl_ctx*
+sw_filter_setup_acl_0(struct rte_acl_rule *acl_base, 
+							unsigned int acl_num,
+							uint16_t port_id,
+							int socketid)
+{
+	char name[32] = {0};
+	struct rte_acl_param acl_param;
+	struct rte_acl_config acl_build_param;
+	struct rte_acl_ctx *context;
+	int dim = RTE_DIM(ipv4_defs);
+
+	/* Create ACL contexts */
+	snprintf(name, sizeof(name), "%s-%02u", "PortAcl0", port_id);
+
+	acl_param.name = name;
+	acl_param.socket_id = socketid;
+	acl_param.rule_size = RTE_ACL_RULE_SZ(dim);
+	acl_param.max_rule_num = MAX_ACL_RULE_NUM;
+
+	if ((context = rte_acl_create(&acl_param)) == NULL)
+	{
+		SW_FILTER_Log_Error("PortID:%u, Failed to create ACL context\n", port_id);
+		return NULL;
+	}
+	
+	if (rte_acl_set_ctx_classify(context, RTE_ACL_CLASSIFY_SCALAR) != 0)
+	{
+		SW_FILTER_Log_Error("PortID:%u, Failed to setup classify method for  ACL context\n", port_id);
+		return NULL;
+	}
+	
+	if (rte_acl_add_rules(context, acl_base, acl_num) < 0)
+	{
+		SW_FILTER_Log_Error("PortID:%u, add rules failed\n", port_id);
+		return NULL;
+	}
+
+	/* Perform builds */
+	memset(&acl_build_param, 0, sizeof(acl_build_param));
+
+	acl_build_param.num_categories = DEFAULT_MAX_CATEGORIES;
+	acl_build_param.num_fields = dim;
+	memcpy(&acl_build_param.defs, ipv4_defs, sizeof(ipv4_defs));
+
+	if (rte_acl_build(context, &acl_build_param) != 0)
+	{
+		SW_FILTER_Log_Error("PortID:%u, Failed to build ACL trie\n", port_id);
+		return NULL;
+	}
+
+	rte_acl_dump(context);
+	return context;
+}
+
+static int
+sw_filter_acl_init_0(const char *path)
+{
+	uint32_t i,j;
+	int socketid;
+	struct rte_acl_rule *acl_base_ipv4;
+	unsigned int acl_num_ipv4 = 0;
+
+	//释放资源
+	for (i = 0; i < SW_DPDK_MAX_PORT; i++)
+	{
+		if (sw_filter_acl_num[i] > 0)
+		{
+			SW_FILTER_Log_Info("ACL-INIT0 PortID:%u start to reset resource ...\n", i);
+
+			if (NULL != sw_filter_acl_ctx[i])
+			{
+				rte_acl_free(sw_filter_acl_ctx[i]);
+				sw_filter_acl_ctx[i] = NULL;
+			}
+		
+			memset(sw_filter_acl_stat[i], 0, sizeof(sw_filter_acl_stat[i]) / sizeof(sw_filter_acl_stat[i][0]));
+			sw_filter_acl_num[i] = 0;
+		}
+	}
+
+	uint32_t rx_port_mask = sw_dpdk_enabled_rx_port_mask();
+	for (i = 0; i < SW_DPDK_MAX_PORT; i++)
+	{
+		if ((rx_port_mask & (1 << i)) == 0)
+		{
+			SW_FILTER_Log_Info("PortID:%u not rx mode, skip it ...\n", i);
+			continue;
+		}
+		else
+			SW_FILTER_Log_Info("PortID:%u is rx mode, start to add acl ...\n", i);
+
+		if (sw_filter_add_rules_0(path, i, &acl_base_ipv4, &acl_num_ipv4, sizeof(struct acl4_rule)) < 0)
 		{
 			SW_FILTER_Log_Error("PortID:%u add rules error!\n", i);
 			return -1;
@@ -744,9 +873,9 @@ sw_filter_acl_init(const char *path)
 		if (acl_num_ipv4 > 0)
 		{
 			sw_filter_acl_num[i] = acl_num_ipv4;
-			sw_filter_acl_rules_base[i] = acl_base_ipv4;
+			//sw_filter_acl_rules_base[i] = acl_base_ipv4;
 			socketid = sw_dpdk_get_port_socket(i);
-			sw_filter_acl_ctx[i] = sw_filter_setup_acl(acl_base_ipv4, acl_num_ipv4, i, socketid);
+			sw_filter_acl_ctx[i] = sw_filter_setup_acl_0(acl_base_ipv4, acl_num_ipv4, i, socketid);
 			if (NULL == sw_filter_acl_ctx[i])
 			{
 				SW_FILTER_Log_Error("PortID:%u add set acl error!\n", i);
@@ -754,6 +883,24 @@ sw_filter_acl_init(const char *path)
 			}
 		}
 	}
+
+	SW_FILTER_Log_Info("\n\nACL-Conf0 ok, start to wait changing to SW_FILTER_MATCH_USED_0 !\n");
+
+	sw_filter_match_used = SW_FILTER_MATCH_USED_0;
+	//wait for the thread using rule 0 to exit
+	for (i = 0; i < SW_DPDK_MAX_PORT; i++)
+	{
+		for (j = 0; j < SW_DPDK_MAX_TX_NUM; j++)
+		{
+			do
+			{	
+				usleep(1000);
+			}
+			while (sw_filter_cur_use[i][j] == SW_FILTER_MATCH_USED_1);		
+		}
+	}
+
+	SW_FILTER_Log_Info("ACL-Conf0 Set SW_FILTER_MATCH_USED_0 ok!\n ");
 
 	return 0;
 }
@@ -830,41 +977,110 @@ static int sw_filter_cmd_show_acl(uint16_t portid, char* buf, int buf_len)
 	}
 
 	struct rte_acl_rule* rule = NULL;
-	for (; i < sw_filter_acl_num[portid]; i++)
+	int cur_used = sw_filter_match_used;
+	if (cur_used == SW_FILTER_MATCH_USED_0)
 	{
-		rule = (struct rte_acl_rule *)((uint8_t*)sw_filter_acl_rules_base[portid] + i * sizeof(struct acl4_rule));
-		len += snprintf(buf+len, buf_len-len, "rule:[%04u] ", i+1);
-		len += snprintf(buf+len, buf_len-len, "hit cnt:%"PRIu64" ", sw_filter_acl_stat[portid][i+1]);
-		
-		unsigned char a, b, c, d;
-		uint32_t_to_char(rule->field[SRC_FIELD_IPV4].value.u32,
-				&a, &b, &c, &d);
-		len += snprintf(buf+len, buf_len-len, "%hhu.%hhu.%hhu.%hhu/%u ", a, b, c, d,
-				rule->field[SRC_FIELD_IPV4].mask_range.u32);
-		uint32_t_to_char(rule->field[DST_FIELD_IPV4].value.u32,
-				&a, &b, &c, &d);
-		len += snprintf(buf+len, buf_len-len, "%hhu.%hhu.%hhu.%hhu/%u ", a, b, c, d,
-				rule->field[DST_FIELD_IPV4].mask_range.u32);
-		len += snprintf(buf+len, buf_len-len, "%hu:%hu %hu:%hu 0x%hhx/0x%hhx ",
-			rule->field[SRCP_FIELD_IPV4].value.u16,
-			rule->field[SRCP_FIELD_IPV4].mask_range.u16,
-			rule->field[DSTP_FIELD_IPV4].value.u16,
-			rule->field[DSTP_FIELD_IPV4].mask_range.u16,
-			rule->field[PROTO_FIELD_IPV4].value.u8,
-			rule->field[PROTO_FIELD_IPV4].mask_range.u8);
-		len += snprintf(buf+len, buf_len-len, "0x%x-0x%x-0x%x \n",
-				rule->data.category_mask,
-				rule->data.priority,
-				rule->data.userdata);
+		for (i = 0; i < sw_filter_acl_num[portid]; i++)
+		{
+			rule = (struct rte_acl_rule *)((uint8_t*)sw_filter_acl_rules_base[portid] + i * sizeof(struct acl4_rule));
+			len += snprintf(buf+len, buf_len-len, "rule:[%04u] ", i+1);
+			len += snprintf(buf+len, buf_len-len, "hit cnt:%"PRIu64" ", sw_filter_acl_stat[portid][i+1].match);
+			
+			unsigned char a, b, c, d;
+			uint32_t_to_char(rule->field[SRC_FIELD_IPV4].value.u32,
+					&a, &b, &c, &d);
+			len += snprintf(buf+len, buf_len-len, "%hhu.%hhu.%hhu.%hhu/%u ", a, b, c, d,
+					rule->field[SRC_FIELD_IPV4].mask_range.u32);
+			uint32_t_to_char(rule->field[DST_FIELD_IPV4].value.u32,
+					&a, &b, &c, &d);
+			len += snprintf(buf+len, buf_len-len, "%hhu.%hhu.%hhu.%hhu/%u ", a, b, c, d,
+					rule->field[DST_FIELD_IPV4].mask_range.u32);
+			len += snprintf(buf+len, buf_len-len, "%hu:%hu %hu:%hu 0x%hhx/0x%hhx ",
+				rule->field[SRCP_FIELD_IPV4].value.u16,
+				rule->field[SRCP_FIELD_IPV4].mask_range.u16,
+				rule->field[DSTP_FIELD_IPV4].value.u16,
+				rule->field[DSTP_FIELD_IPV4].mask_range.u16,
+				rule->field[PROTO_FIELD_IPV4].value.u8,
+				rule->field[PROTO_FIELD_IPV4].mask_range.u8);
+			len += snprintf(buf+len, buf_len-len, "0x%x-0x%x-0x%x \n",
+					rule->data.category_mask,
+					rule->data.priority,
+					rule->data.userdata);
+		}
 	}
-
+	else if (cur_used == SW_FILTER_MATCH_USED_1)
+	{
+		for (i = 0; i < sw_filter_acl_num_1[portid]; i++)
+		{
+			rule = (struct rte_acl_rule *)((uint8_t*)sw_filter_acl_rules_base_1[portid] + i * sizeof(struct acl4_rule));
+			len += snprintf(buf+len, buf_len-len, "rule:[%04u] ", i+1);
+			len += snprintf(buf+len, buf_len-len, "hit cnt:%"PRIu64" ", sw_filter_acl_stat_1[portid][i+1].match);
+			
+			unsigned char a, b, c, d;
+			uint32_t_to_char(rule->field[SRC_FIELD_IPV4].value.u32,
+					&a, &b, &c, &d);
+			len += snprintf(buf+len, buf_len-len, "%hhu.%hhu.%hhu.%hhu/%u ", a, b, c, d,
+					rule->field[SRC_FIELD_IPV4].mask_range.u32);
+			uint32_t_to_char(rule->field[DST_FIELD_IPV4].value.u32,
+					&a, &b, &c, &d);
+			len += snprintf(buf+len, buf_len-len, "%hhu.%hhu.%hhu.%hhu/%u ", a, b, c, d,
+					rule->field[DST_FIELD_IPV4].mask_range.u32);
+			len += snprintf(buf+len, buf_len-len, "%hu:%hu %hu:%hu 0x%hhx/0x%hhx ",
+				rule->field[SRCP_FIELD_IPV4].value.u16,
+				rule->field[SRCP_FIELD_IPV4].mask_range.u16,
+				rule->field[DSTP_FIELD_IPV4].value.u16,
+				rule->field[DSTP_FIELD_IPV4].mask_range.u16,
+				rule->field[PROTO_FIELD_IPV4].value.u8,
+				rule->field[PROTO_FIELD_IPV4].mask_range.u8);
+			len += snprintf(buf+len, buf_len-len, "0x%x-0x%x-0x%x \n",
+					rule->data.category_mask,
+					rule->data.priority,
+					rule->data.userdata);
+		}
+	}
 	return len;
 }
 
 /******************************************************************************/
 
+static int sw_filter_port_1(uint16_t port_id, uint16_t SW_FILTER_UNUSED(thread_id), PKT_INFO_S* pkt_info)
+{
+	if (port_id >= SW_DPDK_MAX_PORT || NULL == sw_filter_acl_ctx_1[port_id])
+		return -1;
 
-int sw_filter_port(uint16_t port_id, PKT_INFO_S* pkt_info)
+	int ret;
+	struct rte_acl_ctx *acl_ctx = sw_filter_acl_ctx_1[port_id];
+	struct ipv4_5tuple v;
+	
+	/* convert to network byte order. */
+	v.proto  = pkt_info->proto;
+	v.ip_src = rte_cpu_to_be_32(pkt_info->sip);
+	v.ip_dst = rte_cpu_to_be_32(pkt_info->dip);
+	v.port_src = rte_cpu_to_be_16(pkt_info->sport);
+	v.port_dst = rte_cpu_to_be_16(pkt_info->dport);
+
+	uint32_t results;
+	const uint8_t *data = (uint8_t *)&v;
+	ret = rte_acl_classify(acl_ctx, &data, &results, 1, 1);
+	if (ret != 0)
+		return -1;
+
+	if (results != 0)
+	{
+	#ifdef SW_FILTER_DEBUG
+		SW_FILTER_Log_Info("Pkt: %u:%u-%u:%u match acl:%u \n", pkt_info->sip, pkt_info->sport, pkt_info->dip, pkt_info->dport, 
+						results);
+	#endif
+
+		SW_FILTER_ADD(sw_filter_acl_stat_1[port_id][results].match);
+	
+		return 0;
+	}
+	
+	return -1;
+}
+
+static int sw_filter_port_0(uint16_t port_id, uint16_t SW_FILTER_UNUSED(thread_id), PKT_INFO_S* pkt_info)
 {
 	if (port_id >= SW_DPDK_MAX_PORT || NULL == sw_filter_acl_ctx[port_id])
 		return -1;
@@ -893,12 +1109,330 @@ int sw_filter_port(uint16_t port_id, PKT_INFO_S* pkt_info)
 						results);
 	#endif
 
-		sw_filter_acl_stat[port_id][results]++;
+		SW_FILTER_ADD(sw_filter_acl_stat[port_id][results].match);
 	
 		return 0;
 	}
 	
 	return -1;
+}
+
+static int sw_filter_acl_init_buf(void)
+{
+	uint32_t i,j;
+	uint32_t rx_port_mask = sw_dpdk_enabled_rx_port_mask();
+	for (i = 0; i < SW_DPDK_MAX_PORT; i++)
+	{
+		for (j = 0; j < SW_DPDK_MAX_TX_NUM; j++)
+			sw_filter_cur_use[i][j] = SW_FILTER_MATCH_USED_NO;
+	
+		if ((rx_port_mask & (1 << i)) == 0)
+		{
+			SW_FILTER_Log_Info("PortID:%u not rx mode, skip init buff ...\n", i);
+			continue;
+		}
+			
+		sw_filter_acl_rules_base[i] = (struct rte_acl_rule *)malloc(MAX_ACL_RULE_NUM * sizeof(struct acl4_rule));		
+		if (NULL == sw_filter_acl_rules_base[i])
+		{
+			SW_FILTER_Log_Error("PortID:%u not able to init buf0 ...\n", i);
+			return -1;
+		}
+
+		sw_filter_acl_rules_base_1[i] = (struct rte_acl_rule *)malloc(MAX_ACL_RULE_NUM * sizeof(struct acl4_rule));		
+		if (NULL == sw_filter_acl_rules_base_1[i])
+		{
+			SW_FILTER_Log_Error("PortID:%u not able to init buf1 ...\n", i);
+			return -1;
+		}
+	}
+
+	return 0;
+}
+
+//0  - ok
+//-1 - format erro
+//-2 - port error
+static int sw_filter_validate(char* rules)
+{
+	int ret;
+	char port_s[32] = {0};
+	char sip_s[32] = {0};
+	char dip_s[32] = {0};
+	char sport_s[32] = {0};
+	char dport_s[32] = {0};
+	char proto_s[32] = {0};
+	if (6 != (ret = sscanf(rules, "%[^,],%[^,],%[^,],%[^,],%[^,],%[^\n]", 
+				port_s,sip_s,dip_s,sport_s,dport_s,proto_s)))
+	{
+		SW_FILTER_Log_Error("sscanf error,ret:%d, %s-%s-%s-%s-%s-%s \n", ret,
+				port_s,sip_s,dip_s,sport_s,dport_s,proto_s);
+		return -1;
+	}
+
+	uint16_t rx_port = atoi(port_s);
+	uint32_t enabled_rx_port_mask = sw_dpdk_enabled_rx_port_mask();
+	if ((enabled_rx_port_mask & (1 << rx_port)) == 0)
+	{
+		SW_FILTER_Log_Error("Port:%u not rx mode !\n", rx_port);
+		return -2;
+	}
+
+	struct acl4_rule tmp;
+	char *_rule = strstr(rules, ",") + 1;
+	if (0 > sw_filter_parse_ipv4_rule(_rule, &tmp))
+	{
+		SW_FILTER_Log_Error("sw_filter_parse_ipv4_rule error, check the config please !\n");
+		return -1;
+	}
+
+	return 0;
+}
+
+static int sw_filter_append_rule(const char* filepath, char *rule)
+{
+	FILE* fp = fopen(filepath, "ab");
+	if (NULL == fp)
+	{
+		SW_FILTER_Log_Error("Fopen file %s error \n", filepath);
+		return -1;
+	}
+	
+	//trim and add \n
+	char trim_rule[128] = {0};
+	uint32_t i, j=0;
+	for (i = 0; i < strlen(rule); i++)
+	{
+		if (rule[i] == '\r' || rule[i] == '\n')
+			continue;
+
+		trim_rule[j++] = rule[i];
+	}
+
+    int _len = strlen(trim_rule);
+	trim_rule[_len] = '\n';
+
+	fwrite(trim_rule, strlen(trim_rule), 1, fp);
+	fflush(fp);
+	
+    usleep(2000);
+	return 0;
+}
+
+static int sw_filter_delete_rule(const char* filepath, uint32_t line_num)
+{
+	FILE* fp_real = fopen(filepath, "rb");
+	if (NULL == fp_real)
+	{
+		SW_FILTER_Log_Error("Fopen file %s error \n", filepath);
+		return -1;
+	}
+	
+	FILE* fp_tmp = fopen(SW_FILTER_CFG_TMP, "wb+"); 
+	if (NULL == fp_tmp)
+	{
+		SW_FILTER_Log_Error("Fopen file %s error \n", SW_FILTER_CFG_TMP);
+		fclose(fp_real);
+		return -1;
+	}
+
+	uint32_t i = 0;
+    char oneline[256] = {0};
+    while(fgets(oneline, sizeof(oneline), fp_real) != NULL )
+    {
+        i++;
+        if (i == line_num)
+        {
+            SW_FILTER_Log_Info("Line number %u is match ,skip ...\n", i);
+        }
+        else
+        {
+            fwrite(oneline, strlen(oneline), 1, fp_tmp);
+            fflush(fp_tmp);
+        }
+
+        memset(oneline, 0, sizeof(oneline));
+    }
+
+	fclose(fp_real);
+	fclose(fp_tmp);
+
+	if (0 != remove(filepath))
+    {
+        SW_FILTER_Log_Error("remove %s error!\n", filepath);
+    }
+
+    if (0 != rename(SW_FILTER_CFG_TMP, filepath))
+    {
+        SW_FILTER_Log_Error("rename error!\n");
+    }
+
+	usleep(2000);
+	return 0;
+}
+
+
+int sw_filter_dynamic_add_rules(char* rules, char* error, int err_len)
+{
+	if (sw_filter_single_user)
+	{
+		SW_FILTER_Log_Error("Maybe someone else is adding or deleting rules, please wait ... \n");
+		snprintf(error, err_len, "Maybe someone else is adding or deleting rules, please wait ... \n");
+		goto _error;
+	}
+
+	sw_filter_single_user = 1; // i am using
+	int ret = sw_filter_validate(rules);
+	if (-1 == ret)
+	{
+		SW_FILTER_Log_Error("Rules format error! \n");
+		snprintf(error, err_len, "Rules format error! \n");
+		goto _error;
+	}
+	else if (-2 == ret)
+	{
+		SW_FILTER_Log_Error("Port Error! \n");
+		snprintf(error, err_len, "Port Error! \n");
+		goto _error;
+	}
+	else
+		SW_FILTER_Log_Info("Rules:%s validate ok !\n", rules);
+
+	//append the rule to file
+	if (0 != sw_filter_append_rule(SW_FILTER_CFG, rules))
+	{
+		SW_FILTER_Log_Error("Add to Rule File Error ! \n");
+		snprintf(error, err_len, "Add to Rule File Error ! \n");
+		goto _error;
+	}
+	else
+		SW_FILTER_Log_Info("Append the rules ok!\n");
+
+	int cur_used = sw_filter_match_used;
+	SW_FILTER_Log_Info("Current used: %d  \n", cur_used);
+	if (cur_used == SW_FILTER_MATCH_USED_0)
+	{
+		SW_FILTER_Log_Info("Current Use Conf0, start to init Conf1 ...\n");
+		ret = sw_filter_acl_init_1(SW_FILTER_CFG);
+	}
+	else if (cur_used == SW_FILTER_MATCH_USED_1)
+	{
+		SW_FILTER_Log_Info("Current Use Conf1, start to init Conf0 ...\n");
+		ret = sw_filter_acl_init_0(SW_FILTER_CFG);
+	}
+	
+	if (0 != ret)
+	{
+		SW_FILTER_Log_Error("Internal Add Rule Error ! \n");
+		snprintf(error, err_len, "Internal Add Rule Error ! \n");
+		goto _error;
+	}
+
+	sw_filter_single_user = 0;
+	return 0;
+
+_error:
+	sw_filter_single_user = 0; 
+	return -1;
+}
+
+int sw_filter_dynamic_del_rule(int port, int rule_id, char* error, int err_len)
+{
+	int ret = -1;
+	if (sw_filter_single_user)
+	{
+		SW_FILTER_Log_Error("Maybe someone else is adding or deleting rules, please wait ... \n");
+		snprintf(error, err_len, "Maybe someone else is adding or deleting rules, please wait ... \n");
+		goto _error;
+	}
+
+	sw_filter_single_user = 1; // i am using
+
+	if (port >= SW_DPDK_MAX_PORT)
+	{
+		SW_FILTER_Log_Error("Port Error !\n");
+		snprintf(error, err_len, "Port Error !\n");
+		goto _error;
+	}
+
+	if (rule_id > MAX_ACL_RULE_NUM || rule_id == 0)
+	{
+		SW_FILTER_Log_Error("RuleID Error !\n");
+		snprintf(error, err_len, "RuleID Error !\n");
+		goto _error;
+	}
+
+	uint32_t line_num = 0;
+	int cur_used = sw_filter_match_used;
+	if (cur_used == SW_FILTER_MATCH_USED_0)
+	{
+		if (!sw_filter_acl_stat[port][rule_id].used)
+		{
+			SW_FILTER_Log_Error("RuleID Not Used !\n");
+			snprintf(error, err_len, "RuleID Not Used !\n");
+			goto _error;
+		}
+		else
+			line_num = sw_filter_acl_stat[port][rule_id].line_num;
+	}
+	else if (cur_used == SW_FILTER_MATCH_USED_1)
+	{
+		if (!sw_filter_acl_stat_1[port][rule_id].used)
+		{
+			SW_FILTER_Log_Error("RuleID Not Used !\n");
+			snprintf(error, err_len, "RuleID Not Used !\n");
+			goto _error;
+		}
+		else
+			line_num = sw_filter_acl_stat_1[port][rule_id].line_num;
+	}
+
+	//validate ok, start to delete this ruleid
+	if (0 != sw_filter_delete_rule(SW_FILTER_CFG, line_num))
+	{
+		SW_FILTER_Log_Error("Delete from Filter Rule File Error ! \n");
+		snprintf(error, err_len, "Delete from Filter Rule File Error ! \n");
+		goto _error;
+	}
+
+	if (cur_used == SW_FILTER_MATCH_USED_0)
+		ret = sw_filter_acl_init_1(SW_FILTER_CFG);
+	else if (cur_used == SW_FILTER_MATCH_USED_1)
+		ret = sw_filter_acl_init_0(SW_FILTER_CFG);
+
+	if (0 != ret)
+	{
+		SW_FILTER_Log_Error("Internal Delete Rule Error ! \n");
+		snprintf(error, err_len, "Internal Delete Rule Error ! \n");
+		goto _error;
+	}
+	
+	sw_filter_single_user = 0;
+	return 0;
+
+_error:
+	sw_filter_single_user = 0; 
+	return -1;
+
+	
+}
+
+int sw_filter_port(uint16_t portid, uint16_t thread_id, PKT_INFO_S* pkt_info)
+{
+	int ret = -1;
+	int cur_used = sw_filter_match_used;
+	sw_filter_cur_use[portid][thread_id] = cur_used;
+	if (cur_used == SW_FILTER_MATCH_USED_0)
+	{
+		ret = sw_filter_port_0(portid, thread_id, pkt_info);
+	}
+	else if (cur_used == SW_FILTER_MATCH_USED_1)
+	{
+		ret = sw_filter_port_1(portid, thread_id, pkt_info);		
+	}
+
+	sw_filter_cur_use[portid][thread_id] = SW_FILTER_MATCH_USED_NO;
+	return ret;
 }
 
 int sw_filter_init(const char *cfg_path)
@@ -909,7 +1443,13 @@ int sw_filter_init(const char *cfg_path)
 		return -1;
 	}
 
-	if (0 != sw_filter_acl_init(cfg_path))
+	if (0 != sw_filter_acl_init_buf())
+	{
+		SW_FILTER_Log_Error("sw_filter_acl_init_buf error!\n");
+		return -1;
+	}
+
+	if (0 != sw_filter_acl_init_0(cfg_path))
 	{
 		SW_FILTER_Log_Error("sw_filter_acl_init error!\n");
 		return -1;
