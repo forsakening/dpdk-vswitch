@@ -1,0 +1,43 @@
+重启之后操作如下:
+加载驱动：
+1)modprobe uio
+2)insmod /usr/local/dpdk/kmod/igb_uio.ko
+
+断开网卡：
+3)ifdown p2p2
+4)ifdown p1p1
+(仅做示例)
+
+绑定网卡:
+5)cd /home/switch/usertools/   执行 ./dpdk-setup.sh
+6)选择[8]Bind Ethernet/Crypto device to IGB UIO module, 把43:00:1 和 44:00.0 绑定至dpdk （仅作示例）
+
+设置内存:
+7)cd /home/switch/usertools/   执行 ./dpdk-setup.sh
+8)选择[6] Setup hugepage mappings for NUMA systems
+分别输入
+numa 0 : 100   
+numa 1 : 20000   (2000 * 2M 就是40G， 如果numa 1内存多了，这个地方就相应的调大一点)
+numa 2 : 100
+numa 3 : 100
+(这个要看每路各插了多少内存)
+
+修改配置
+9）cd /home/switch/conf 目录，修改 vswitch.conf文件
+增加每对网卡的配置项，配置项说明如下：rx_port,tx_port,rx_core,tx_core_map,delay_s  ， 其中发包支持多cpu模式，故tx_core_map的配置为类似[1 2 3] 即 1 2 3号cpu
+如 
+0,1,4,[24],10    ---> 就是0号端口收到的报文转发至1号端口，4号cpu负责收包，24号cpu负责发包，并延迟10秒
+2,3,8,[28],10    ---> 就是2号端口收到的报文转发至3号端口，8号cpu负责收包，28号cpu负责发包，并延迟10秒
+
+启动程序：
+10）cd /home/switch/build/  执行 ./vswitch ../conf/vswitch.conf
+
+启动控制台：
+11）cd /home/switch/build/  执行 ./vconsole
+
+查看端口的统计
+在控制台输入  show port stats 2 
+
+内存计算方式:
+按照现网的测试环境，每对端口每延迟1秒的报文就需要8G左右内存，故每对端口延迟10s，大概需要80G内存
+6对的话，则需要480G内存

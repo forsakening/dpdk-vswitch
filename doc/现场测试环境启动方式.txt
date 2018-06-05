@@ -1,0 +1,33 @@
+重启之后操作如下:
+加载驱动：
+1)modprobe uio
+2)insmod /usr/local/dpdk/kmod/igb_uio.ko
+
+断开网卡：
+3)ifdown p2p2
+4)ifdown p1p1
+
+绑定网卡:
+5)cd /home/switch/usertools/   执行 ./dpdk-setup.sh
+6)选择[8]Bind Ethernet/Crypto device to IGB UIO module, 把43:00:1 和 44:00.0 绑定至dpdk
+
+设置内存:
+7)cd /home/switch/usertools/   执行 ./dpdk-setup.sh
+8)选择[6] Setup hugepage mappings for NUMA systems
+分别输入
+numa 0 : 100
+numa 1 : 20000   (2000 * 2M 就是40G， 如果numa 1内存多了，这个地方就相应的调大一点)
+numa 2 : 100
+numa 3 : 100
+
+
+启动程序：
+9）)cd /home/switch/build/  执行 ./vswitch
+
+
+如果内存确定分到了NUMA 1了，
+更改/home/switch/src/sw_dpdk.c  48 行的 #define SW_DPDK_MAX_MBUF_NUM (1<<24)  这部分代码，目前 1<<24 是1600w的包，使用大概32G的内存
+
+如果确定numa 1 能分到大概35000*2M 的内存，这部分代码可改为#define SW_DPDK_MAX_MBUF_NUM (1<<25)，也就是3200w的包，使用大概64G的内存
+
+修改完代码后，重新进入/home/switch/，执行make，然后去build目录下执行 ./vswitch
