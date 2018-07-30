@@ -3,6 +3,7 @@
 //@20180413 by Shawn.Z v1.2 support packet parse
 //@20180414 by Shawn.Z v1.3 support tuple filter
 //@20180516 by Shawn.Z v1.4 support offset filter
+//@20180605 by Shawn.Z v1.5 support http rest api
 #define _GNU_SOURCE             /* See feature_test_macros(7) */
 #include <sched.h>
 #include <stdio.h>
@@ -54,6 +55,8 @@
 //#define SW_DPDK_DEBUG 1
 
 #define RTE_LOGTYPE_VSWITCH RTE_LOGTYPE_USER1
+
+#define SW_DPDK_MBUF_TOTAL (SW_DPDK_MBUF_LEN + RTE_PKTMBUF_HEADROOM)
 
 static volatile bool force_quit = false;
 static volatile bool sw_dpdk_eal_init = false;
@@ -465,7 +468,7 @@ static int sw_dpdk_setup_buffer(uint16_t rx_port)
 	if (socket_id < 0)
 		socket_id = SOCKET_ID_ANY;
 	sw_port_peer[rx_port].rx_mempool = (void *)rte_pktmbuf_pool_create(mbuf_name, mbuf_num, MEMPOOL_CACHE_SIZE, 0, 
-						RTE_MBUF_DEFAULT_BUF_SIZE, socket_id);
+						SW_DPDK_MBUF_TOTAL, socket_id);
 	if (NULL == sw_port_peer[rx_port].rx_mempool)
 	{
 		SW_DPDK_Log_Error("rx port : %u init mbuf error,mbuf num %d ! \n", rx_port, mbuf_num);
@@ -1481,6 +1484,8 @@ sw_dpdk_main_loop(void *arg)
 	uint16_t check_cnt = 0;
 	while (!force_quit) {
 
+		//usleep(1000);
+
 		//隔固定的时间检查更新配置
 		if (check_cnt++ % 4096 == 0)
 		{
@@ -1548,7 +1553,8 @@ sw_dpdk_main_loop(void *arg)
 				if (loopback)
 				{
 					//设置ref cnt自增1
-					rte_mbuf_refcnt_update(m, 1);
+					//rte_mbuf_refcnt_update(m, 1);
+					rte_pktmbuf_refcnt_update(m, 1);
 				}
 				
 				//printf("Time:%18"PRIu64"Recv A pkt,timeout:%18"PRIu64"\n", cur_tsc, m->timestamp);
@@ -1939,4 +1945,210 @@ int sw_dpdk_init(char* conf_path, uint32_t dpdk_pps)
 
 	return 0;
 }
+
+
+///////////////////////////////////////////////////////////////////
+uint32_t sw_dpdk_http_show_port(uint32_t portid, SW_DPDK_HTTP_PORT_INFO* port_info, char* buf, int buf_len)
+{
+	int len = 0;
+	uint16_t i = 0;
+	if ((sw_enabled_port_mask & (1 << portid)) == 0)
+	{
+		len += snprintf(buf+len, buf_len-len, "PortID:%u is not enabled, PortMask:0x%x! ", portid, sw_enabled_port_mask);
+		return len;
+	}
+
+	memset(port_info, 0, sizeof(SW_DPDK_HTTP_PORT_INFO));
+
+	port_info->running_sec = sw_running_seconds;
+
+	uint32_t tx_port = 0;
+	if (sw_port_mode_map[portid] == SW_PORT_RX)
+	{
+		port_info->portid = portid;
+		port_info->peer_port = sw_port_peer[portid].tx_port;
+		port_info->mode = SW_PORT_RX;
+		tx_port = sw_port_peer[portid].tx_port;
+	}
+	else if (sw_port_mode_map[portid] == SW_PORT_TX)
+	{
+		port_info->portid = portid;
+		port_info->peer_port = sw_port_peer[portid].rx_port;
+		port_info->mode = SW_PORT_TX;
+		tx_port = portid;
+	}
+	
+	//statictis
+	struct rte_eth_stats stats;
+	rte_eth_stats_get(portid, &stats);
+	port_info->rx = stats.ipackets;
+	port_info->rx_bytes = stats.ibytes;
+	port_info->tx = stats.opackets;
+	port_info->tx_bytes = stats.obytes;
+	port_info->rx_pps = port_hw_stat[portid].rx_pps;
+	port_info->tx_pps = port_hw_stat[portid].tx_pps;
+	port_info->rx_bps = port_hw_stat[portid].rx_bps;
+	port_info->tx_bps = port_hw_stat[portid].tx_bps;
+
+	for (i = 0; i < sw_port_peer[tx_port].tx_core_num; i++)
+	{
+		port_info->filter_len += port_sw_stat[tx_port].filter_len[i];
+		port_info->filter_syn += port_sw_stat[tx_port].filter_syn[i];
+		port_info->filter_acl += port_sw_stat[tx_port].filter_acl[i];
+		port_info->filter_offset += port_sw_stat[tx_port].filter_offset[i];
+
+		port_info->vlan_pkts += port_sw_stat[tx_port].vlan_pkts[i];
+		port_info->mpls_pkts += port_sw_stat[tx_port].mpls_pkts[i];
+		port_info->ipv4_pkts += port_sw_stat[tx_port].ipv4_pkts[i];
+		port_info->icmp_pkts += port_sw_stat[tx_port].icmp_pkts[i];
+		port_info->tcp_pkts += port_sw_stat[tx_port].tcp_pkts[i];
+		port_info->udp_pkts += port_sw_stat[tx_port].udp_pkts[i];
+
+		port_info->len_less_128 += port_sw_stat[tx_port].len_less_128[i];
+		port_info->len_128_256 += port_sw_stat[tx_port].len_128_256[i];
+		port_info->len_256_512 += port_sw_stat[tx_port].len_256_512[i];
+		port_info->len_512_1024 += port_sw_stat[tx_port].len_512_1024[i];
+		port_info->len_more_1024 += port_sw_stat[tx_port].len_more_1024[i];
+	}
+		
+	return len;
+}
+
+uint32_t sw_dpdk_http_show_fwd(uint32_t portid, SW_DPDK_HTTP_FWD_INFO* fwd_info, char* buf, int buf_len)
+{
+	uint32_t len = 0;
+	if ((sw_enabled_port_mask & (1 << portid)) == 0)
+	{
+		len += snprintf(buf+len, buf_len-len, "PortID:%u is not enabled, PortMask:0x%x! ", portid, sw_enabled_port_mask);
+		return len;
+	}
+
+	if ((sw_used_rx_port_mask & (1 << portid)) == 0)
+	{
+		len += snprintf(buf+len, buf_len-len, "PortID:%u is not rx mode, PortMask:0x%x! ", portid, sw_used_rx_port_mask);
+		return len;
+	}
+
+	memset(fwd_info, 0, sizeof(SW_DPDK_HTTP_FWD_INFO));
+
+	fwd_info->portid = portid;
+	fwd_info->delay_s = sw_port_peer[portid].delay_s;
+	fwd_info->loopback = sw_port_peer[portid].loopback;
+	fwd_info->filter_len = sw_port_peer_fwd_rules[portid].len_filter_len;
+	fwd_info->len_mode = sw_port_peer_fwd_rules[portid].len_filter_mode;
+	fwd_info->syn_mode = sw_port_peer_fwd_rules[portid].syn_filter_mode;
+	fwd_info->acl_mode = sw_port_peer_fwd_rules[portid].acl_filter_mode;
+	fwd_info->off_mode = sw_port_peer_fwd_rules[portid].offset_filter_mode;
+
+	return len;
+}
+
+uint32_t sw_dpdk_http_set_fwd(uint32_t portid, SW_DPDK_HTTP_FWD_INFO* fwd_info, char* buf, int buf_len)
+{
+	uint32_t len = 0;
+	if ((sw_enabled_port_mask & (1 << portid)) == 0)
+	{
+		len += snprintf(buf+len, buf_len-len, "PortID:%u is not enabled, PortMask:0x%0x! ", portid, sw_enabled_port_mask);
+		return len;
+	}
+
+	if ((sw_used_rx_port_mask & (1 << portid)) == 0)
+	{
+		len += snprintf(buf+len, buf_len-len, "PortID:%u is not rx mode, PortMask:0x%0x! ", portid, sw_used_rx_port_mask);
+		return len;
+	}
+
+	uint16_t delay_s = fwd_info->delay_s;
+	uint16_t loopback = fwd_info->loopback;
+	uint16_t filter_len = fwd_info->filter_len;
+	uint16_t len_mode = fwd_info->len_mode;
+	uint16_t syn_mode = fwd_info->syn_mode;
+	uint16_t acl_mode = fwd_info->acl_mode;
+	uint16_t off_mode = fwd_info->off_mode;
+
+	if (delay_s > sw_port_delay_init[portid])
+	{
+		len += snprintf(buf+len, buf_len-len, "PortID:%u Initial Delay is %u seconds! ", portid, sw_port_delay_init[portid]);
+		return len;
+	}
+
+	if (loopback != 0 && loopback != 1)
+	{
+		len += snprintf(buf+len, buf_len-len, "loopback : %u  error !", loopback);
+		return len;
+	}
+
+	if (loopback)
+	{
+		if (len_mode == SW_FILTER_LEN_RXPORT)
+		{
+			len += snprintf(buf+len, buf_len-len, "loopback, len-mode should not be 1 ...  ");
+			return len;
+		}
+
+		if (syn_mode == SW_FILTER_SYN_RXPORT)
+		{
+			len += snprintf(buf+len, buf_len-len, "loopback, syn-mode should not be 1 ...  ");
+			return len;
+		}
+
+		if (off_mode == SW_FILTER_OFF_RXPORT)
+		{
+			len += snprintf(buf+len, buf_len-len, "loopback, offset-mode should not be 1 ...  ");
+			return len;
+		}
+	}
+
+	if (filter_len <= SW_DPDK_PKT_LEN_MIN || SW_DPDK_PKT_LEN_MIN >= filter_len)
+	{
+		len += snprintf(buf+len, buf_len-len, "len : %u  error !", filter_len);
+		return len;
+	}
+
+	if ( SW_FILTER_LEN_TXPORT < len_mode)
+	{
+		len += snprintf(buf+len, buf_len-len, "len-mode : %u  error !", len_mode);
+		return len;
+	}
+
+	if (SW_FILTER_SYN_TXPORT < syn_mode)
+	{
+		len += snprintf(buf+len, buf_len-len, "syn-mode : %u  error !", syn_mode);
+		return len;
+	}
+
+	if (SW_FILTER_ACL_TXPORT < acl_mode)
+	{
+		len += snprintf(buf+len, buf_len-len, "acl-mode : %u  error !", acl_mode);
+		return len;
+	}
+	
+	if (SW_FILTER_OFF_TXPORT < off_mode)
+	{
+		len += snprintf(buf+len, buf_len-len, "off-mode : %u  error !", off_mode);
+		return len;
+	}
+
+	//update , maybe need to lock
+	uint32_t tx_port = sw_port_peer[portid].tx_port;
+	sw_port_peer[portid].loopback = loopback;
+	sw_port_peer[portid].delay_s = delay_s;
+	sw_port_peer[tx_port].loopback = loopback;
+	sw_port_peer[tx_port].delay_s = delay_s;
+	
+	sw_port_peer_fwd_rules[portid].len_filter_len = filter_len;
+	sw_port_peer_fwd_rules[portid].len_filter_mode = len_mode;
+	sw_port_peer_fwd_rules[portid].syn_filter_mode = syn_mode;
+	sw_port_peer_fwd_rules[portid].acl_filter_mode = acl_mode;
+	sw_port_peer_fwd_rules[portid].offset_filter_mode = off_mode;
+
+	uint32_t i = 0;
+	sw_port_need_update_rx[portid] = 1;
+	for (; i < sw_port_peer[portid].tx_core_num; i++)
+		sw_port_need_update_tx[tx_port][i] = 1;
+		
+	return len;
+}
+
+
 

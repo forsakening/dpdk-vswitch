@@ -1,0 +1,20 @@
+all:libsw_httpserver
+
+libhttpserver:
+	rm -rf src/lib_httpserver/*
+	cd src/httpserver && make clean && make
+	mkdir -p src/lib_httpserver/
+	cp src/httpserver/output/lib/libsimpleserver.a src/lib_httpserver/
+	cp src/httpserver/deps/json-cpp/output/lib/libjson_libmt.a src/lib_httpserver/
+	ar -rcs src/lib_httpserver/libmultipart_parser.a src/httpserver/deps/multipart-parser-c/multipart_parser.o        
+	cp src/httpserver/deps/http-parser/http_parser.o src/lib_httpserver/
+
+libsw_httpserver:libhttpserver
+	g++ -g -Wall -I/usr/local/dpdk/share/dpdk/x86_64-native-linuxapp-gcc/include -I src/httpserver/deps/json-cpp/include/ -I src/httpserver/deps/http-parser/ -I src/httpserver/deps/multipart-parser-c/ -I src/httpserver/output/include  -c src/sw_httpserver.cpp -o src/lib_httpserver/sw_httpserver.o
+	cd src/lib_httpserver/ && ar -x libmultipart_parser.a && ar -x libjson_libmt.a && ar -x libsimpleserver.a
+	cd src/lib_httpserver/ && rm -rf ./*.a
+	#ar -rcs src/lib_httpserver/libswhttp.a src/lib_httpserver/*.o
+	#cd src/lib_httpserver/ && rm -rf ./*.o
+	mkdir -p /run/vswitch/src/lib_httpserver/ && rm -rf /run/vswitch/src/lib_httpserver/*  && cp -rf src/lib_httpserver/*.o /run/vswitch/src/lib_httpserver/
+	cd src/httpserver && make clean
+

@@ -1679,12 +1679,119 @@ static int sw_offset_delete_rule(const char* filepath, uint32_t line_num)
 	return 0;
 }
 
-int sw_offset_dynamic_add_rules(char* rules, char* error, int err_len)
+uint32_t sw_offset_show_rules(int portid, int type, char** rule_arr, int* rule_num, char* buf, int buf_len)
 {
+	int len = 0;
+	int i = 0;
+	uint32_t enabled_port_mask = sw_dpdk_enabled_port_mask();
+	uint32_t enabled_rx_port_mask = sw_dpdk_enabled_rx_port_mask();
+	if ((enabled_port_mask & (1 << portid)) == 0)
+	{
+		len += snprintf(buf+len, buf_len-len, "PortID:%u is not enabled, PortMask:%d!", portid, enabled_port_mask);
+		return len;
+	}
+
+	if ((enabled_rx_port_mask & (1 << portid)) == 0)
+	{
+		len += snprintf(buf+len, buf_len-len, "PortID:%u is not rx mode !", portid);
+		return len;
+	}
+
+	if (type != SW_OFFSET_L4 && type != SW_OFFSET_L3 && type != SW_OFFSET_L2)
+	{
+		len += snprintf(buf+len, buf_len-len, "Type:%d is not right, please input 2 or 3 or 4 !", type);
+		return len;
+	}
+
+	if (sw_offset_match_used == SW_OFFSET_MATCH_USED_0)
+	{
+		if (type == SW_OFFSET_L4)
+		{
+			for (i = 0; i < hs_exp_l4_num[portid]; i++)
+			{
+				snprintf(rule_arr[i], SW_OFFSET_SHOW_RULE_LEN, "RuleID:%05d  Match:%12"PRIu64"  Alias:%16s  Pattern:%s ", i,
+					sw_offset_rule_info_l4[portid][i].match_cnt, 
+					sw_offset_rule_info_l4[portid][i].alias, 
+					sw_offset_rule_info_l4[portid][i].value);
+			}
+
+			*rule_num = hs_exp_l4_num[portid];
+		}
+		else if (type == SW_OFFSET_L3)
+		{
+			for (i = 0; i < hs_exp_l3_num[portid]; i++)
+			{
+				snprintf(rule_arr[i], SW_OFFSET_SHOW_RULE_LEN, "RuleID:%05d  Match:%12"PRIu64"  Alias:%16s  Pattern:%s ", i,
+					sw_offset_rule_info_l3[portid][i].match_cnt, 
+					sw_offset_rule_info_l3[portid][i].alias, 
+					sw_offset_rule_info_l3[portid][i].value);
+			}
+
+			*rule_num = hs_exp_l3_num[portid];
+		}
+		else if (type == SW_OFFSET_L2)
+		{
+			for (i = 0; i < hs_exp_l2_num[portid]; i++)
+			{
+				snprintf(rule_arr[i], SW_OFFSET_SHOW_RULE_LEN, "RuleID:%05d  Match:%12"PRIu64"  Alias:%16s  Pattern:%s ", i,
+					sw_offset_rule_info_l2[portid][i].match_cnt, 
+					sw_offset_rule_info_l2[portid][i].alias, 
+					sw_offset_rule_info_l2[portid][i].value);
+			}
+
+			*rule_num = hs_exp_l2_num[portid];
+		}
+	}
+	else if (sw_offset_match_used == SW_OFFSET_MATCH_USED_1)
+	{
+		if (type == SW_OFFSET_L4)
+		{
+			for (i = 0; i < hs_exp_l4_num_1[portid]; i++)
+			{
+				snprintf(rule_arr[i], SW_OFFSET_SHOW_RULE_LEN, "    %05d  Match:%12"PRIu64"  Alias:%16s  Pattern:%s\n", i,
+					sw_offset_rule_info_l4_1[portid][i].match_cnt, 
+					sw_offset_rule_info_l4_1[portid][i].alias, 
+					sw_offset_rule_info_l4_1[portid][i].value);
+			}
+
+			*rule_num = hs_exp_l4_num_1[portid];
+		}
+		else if (type == SW_OFFSET_L3)
+		{
+			for (i = 0; i < hs_exp_l3_num_1[portid]; i++)
+			{
+				snprintf(rule_arr[i], SW_OFFSET_SHOW_RULE_LEN, "RuleID:%05d  Match:%12"PRIu64"  Alias:%16s  Pattern:%s ", i,
+					sw_offset_rule_info_l3_1[portid][i].match_cnt, 
+					sw_offset_rule_info_l3_1[portid][i].alias, 
+					sw_offset_rule_info_l3_1[portid][i].value);
+			}
+
+			*rule_num = hs_exp_l3_num_1[portid];
+		}
+		else if (type == SW_OFFSET_L2)
+		{
+			for (i = 0; i < hs_exp_l2_num_1[portid]; i++)
+			{
+				snprintf(rule_arr[i], SW_OFFSET_SHOW_RULE_LEN, "RuleID:%05d  Match:%12"PRIu64"  Alias:%16s  Pattern:%s ", i,
+					sw_offset_rule_info_l2_1[portid][i].match_cnt, 
+					sw_offset_rule_info_l2_1[portid][i].alias, 
+					sw_offset_rule_info_l2_1[portid][i].value);
+			}
+
+			*rule_num = hs_exp_l2_num_1[portid];
+		}
+	}
+	
+	return 0;
+}
+
+uint32_t sw_offset_dynamic_add_rules(char* rules, char* error, int err_len)
+{
+	uint32_t ret_len = 0;
 	if (sw_offset_single_user)
 	{
 		SW_OFFSET_Log_Error("Maybe someone else is adding or deleting rules, please wait ... \n");
-		snprintf(error, err_len, "Maybe someone else is adding or deleting rules, please wait ... \n");
+		ret_len += snprintf(error, err_len, "Maybe someone else is adding or deleting rules, please wait ... \n");
 		goto _error;
 	}
 
@@ -1695,13 +1802,13 @@ int sw_offset_dynamic_add_rules(char* rules, char* error, int err_len)
 	if (-1 == ret)
 	{
 		SW_OFFSET_Log_Error("Rules format error! \n");
-		snprintf(error, err_len, "Rules format error! \n");
+		ret_len += snprintf(error, err_len, "Rules format error! \n");
 		goto _error;
 	}
 	else if (-2 == ret)
 	{
 		SW_OFFSET_Log_Error("Port Error! \n");
-		snprintf(error, err_len, "Port Error! \n");
+		ret_len += snprintf(error, err_len, "Port Error! \n");
 		goto _error;
 	}
 	else
@@ -1711,7 +1818,7 @@ int sw_offset_dynamic_add_rules(char* rules, char* error, int err_len)
 	if (0 != sw_offset_append_rule(SW_OFFSET_CFG, rules))
 	{
 		SW_OFFSET_Log_Error("Add to Rule File Error ! \n");
-		snprintf(error, err_len, "Add to Rule File Error ! \n");
+		ret_len += snprintf(error, err_len, "Add to Rule File Error ! \n");
 		goto _error;
 	}
 	else
@@ -1733,7 +1840,7 @@ int sw_offset_dynamic_add_rules(char* rules, char* error, int err_len)
 	if (0 != ret)
 	{
 		SW_OFFSET_Log_Error("Internal Add Rule Error ! \n");
-		snprintf(error, err_len, "Internal Add Rule Error ! \n");
+		ret_len += snprintf(error, err_len, "Internal Add Rule Error ! \n");
 		goto _error;
 	}
 	
@@ -1742,17 +1849,18 @@ int sw_offset_dynamic_add_rules(char* rules, char* error, int err_len)
 
 _error:
 	sw_offset_single_user = 0; 
-	return -1;
+	return ret_len;
 
 }
 
-int sw_offset_dynamic_del_rule(int port, int type, int rule_id, char* error, int err_len)
+uint32_t sw_offset_dynamic_del_rule(int port, int type, int rule_id, char* error, int err_len)
 {
+	uint32_t ret_len = 0;
 	int ret = -1;
 	if (sw_offset_single_user)
 	{
 		SW_OFFSET_Log_Error("Maybe someone else is adding or deleting rules, please wait ... \n");
-		snprintf(error, err_len, "Maybe someone else is adding or deleting rules, please wait ... \n");
+		ret_len += snprintf(error, err_len, "Maybe someone else is adding or deleting rules, please wait ... \n");
 		goto _error;
 	}
 
@@ -1762,14 +1870,14 @@ int sw_offset_dynamic_del_rule(int port, int type, int rule_id, char* error, int
 	if (port >= SW_DPDK_MAX_PORT)
 	{
 		SW_OFFSET_Log_Error("Port Error !\n");
-		snprintf(error, err_len, "Port Error !\n");
+		ret_len += snprintf(error, err_len, "Port Error !\n");
 		goto _error;
 	}
 
 	if (rule_id >= SW_OFFSET_MAX_NUM)
 	{
 		SW_OFFSET_Log_Error("RuleID Error !\n");
-		snprintf(error, err_len, "RuleID Error !\n");
+		ret_len += snprintf(error, err_len, "RuleID Error !\n");
 		goto _error;
 	}
 
@@ -1781,7 +1889,7 @@ int sw_offset_dynamic_del_rule(int port, int type, int rule_id, char* error, int
 			if (!sw_offset_rule_info_l2[port][rule_id].used)
 			{
 				SW_OFFSET_Log_Error("RuleID Not Init !\n");
-				snprintf(error, err_len, "RuleID Not Init !\n");
+				ret_len += snprintf(error, err_len, "RuleID Not Init !\n");
 				goto _error;
 			}
 			else
@@ -1794,7 +1902,7 @@ int sw_offset_dynamic_del_rule(int port, int type, int rule_id, char* error, int
 			if (!sw_offset_rule_info_l2_1[port][rule_id].used)
 			{
 				SW_OFFSET_Log_Error("RuleID Not Init !\n");
-				snprintf(error, err_len, "RuleID Not Init !\n");
+				ret_len += snprintf(error, err_len, "RuleID Not Init !\n");
 				goto _error;
 			}
 			else
@@ -1810,7 +1918,7 @@ int sw_offset_dynamic_del_rule(int port, int type, int rule_id, char* error, int
 			if (!sw_offset_rule_info_l3[port][rule_id].used)
 			{
 				SW_OFFSET_Log_Error("RuleID Not Init !\n");
-				snprintf(error, err_len, "RuleID Not Init !\n");
+				ret_len += snprintf(error, err_len, "RuleID Not Init !\n");
 				goto _error;
 			}
 			else
@@ -1823,7 +1931,7 @@ int sw_offset_dynamic_del_rule(int port, int type, int rule_id, char* error, int
 			if (!sw_offset_rule_info_l3_1[port][rule_id].used)
 			{
 				SW_OFFSET_Log_Error("RuleID Not Init !\n");
-				snprintf(error, err_len, "RuleID Not Init !\n");
+				ret_len += snprintf(error, err_len, "RuleID Not Init !\n");
 				goto _error;
 			}
 			else
@@ -1839,7 +1947,7 @@ int sw_offset_dynamic_del_rule(int port, int type, int rule_id, char* error, int
 			if (!sw_offset_rule_info_l4[port][rule_id].used)
 			{
 				SW_OFFSET_Log_Error("RuleID Not Init !\n");
-				snprintf(error, err_len, "RuleID Not Init !\n");
+				ret_len += snprintf(error, err_len, "RuleID Not Init !\n");
 				goto _error;
 			}
 			else
@@ -1852,7 +1960,7 @@ int sw_offset_dynamic_del_rule(int port, int type, int rule_id, char* error, int
 			if (!sw_offset_rule_info_l4_1[port][rule_id].used)
 			{
 				SW_OFFSET_Log_Error("RuleID Not Init !\n");
-				snprintf(error, err_len, "RuleID Not Init !\n");
+				ret_len += snprintf(error, err_len, "RuleID Not Init !\n");
 				goto _error;
 			}
 			else
@@ -1864,7 +1972,7 @@ int sw_offset_dynamic_del_rule(int port, int type, int rule_id, char* error, int
 	else
 	{
 		SW_OFFSET_Log_Error("Type Error !\n");
-		snprintf(error, err_len, "Type Error !\n");
+		ret_len += snprintf(error, err_len, "Type Error !\n");
 		goto _error;
 	}
 
@@ -1872,7 +1980,7 @@ int sw_offset_dynamic_del_rule(int port, int type, int rule_id, char* error, int
 	if (0 != sw_offset_delete_rule(SW_OFFSET_CFG, line_num))
 	{
 		SW_OFFSET_Log_Error("Delete from Rule File Error ! \n");
-		snprintf(error, err_len, "Delete from Rule File Error ! \n");
+		ret_len += snprintf(error, err_len, "Delete from Rule File Error ! \n");
 		goto _error;
 	}
 
@@ -1885,7 +1993,7 @@ int sw_offset_dynamic_del_rule(int port, int type, int rule_id, char* error, int
 	if (0 != ret)
 	{
 		SW_OFFSET_Log_Error("Internal Delete Rule Error ! \n");
-		snprintf(error, err_len, "Internal Delete Rule Error ! \n");
+		ret_len += snprintf(error, err_len, "Internal Delete Rule Error ! \n");
 		goto _error;
 	}
 	
@@ -1894,7 +2002,7 @@ int sw_offset_dynamic_del_rule(int port, int type, int rule_id, char* error, int
 
 _error:
 	sw_offset_single_user = 0; 
-	return -1;
+	return ret_len;
 }
 
 

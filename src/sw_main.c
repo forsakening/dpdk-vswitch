@@ -14,6 +14,7 @@
 #include "sw_dpdk.h"
 #include "sw_filter.h"
 #include "sw_offset.h"
+#include "sw_httpserver.h"
 
 #define VSWITCH_LOCK "/run/vswitch.lock"
 
@@ -90,6 +91,13 @@ int main(int argc, char ** argv)
 	{
 		//sw_log(SW_LOG_ERROR, "sw_dpdk_init error, ret=%d!", ret);
 		printf("sw_offset_init error, ret=%d!", ret);
+		goto _quit;
+	}
+
+	ret = sw_httpserver_init(22334);
+	if (0 != ret)
+	{
+		printf("sw_httpserver_init error, ret=%d!", ret);
 		goto _quit;
 	}
 	

@@ -11,6 +11,8 @@
 #define SW_DPDK_Log_Error(fmt,...) printf("\033[0;32;31m[SWDPDK ERROR] \033[m"fmt, ##__VA_ARGS__);
 #define SW_DPDK_Log_Info(fmt,...) printf("\033[0;32;32m[SWDPDK INFO] \033[m"fmt, ##__VA_ARGS__);
 
+#define SW_DPDK_MBUF_LEN 1664  // % 128 == 0 split header issue
+
 //#define SW_DPDK_Log_Debug(fmt,...) printf("\033[0;32;32m[SWDPDK DBG] \033[m"fmt, ##__VA_ARGS__);
 #define SW_DPDK_Log_Debug(fmt,...)
 
@@ -113,5 +115,83 @@ int sw_dpdk_get_port_socket(uint16_t port_id);
 int sw_dpdk_start(void);
 
 int sw_dpdk_init(char *, uint32_t);
+
+uint32_t sw_dpdk_dynamic_set_fwd(uint16_t portid,
+	                      uint16_t delay_s,
+	                      uint16_t loopback,
+	                      uint16_t filter_len,
+	                      uint16_t len_mode,
+	                      uint16_t syn_mode,
+	                      uint16_t acl_mode,
+	                      uint16_t off_mode,
+					      char* err, int err_len);
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+//for http rest api use
+typedef struct
+{
+	uint32_t portid;
+	uint32_t running_sec;
+	uint32_t mode;
+	uint32_t peer_port;
+
+	uint64_t tx;
+	uint64_t rx;
+	uint64_t rx_bytes;
+	uint64_t tx_bytes;
+	uint64_t rx_pps;				//收包pps，成功的包
+	uint64_t tx_pps;				//发包pps
+	uint64_t rx_bps;				//收包bps,成功的包
+	uint64_t tx_bps;				//发包bps
+	//uint64_t rx_pps_total;			//收到的所有包，包括错误报的pps
+	//uint64_t rx_pps_total_average;	//平均值
+	//uint64_t tx_pps_total;			//发送的所有包
+
+	uint64_t filter_len;
+	uint64_t filter_acl;
+	uint64_t filter_offset;
+	uint64_t filter_syn;
+
+	//cache - stat
+	uint64_t vlan_pkts;
+	uint64_t mpls_pkts;
+	uint64_t ipv4_pkts;
+	uint64_t icmp_pkts;
+	uint64_t tcp_pkts;
+	uint64_t udp_pkts;
+
+	//pkts distribute
+	uint64_t len_less_128;
+	uint64_t len_128_256;
+	uint64_t len_256_512;
+	uint64_t len_512_1024;
+	uint64_t len_more_1024;
+}SW_DPDK_HTTP_PORT_INFO;
+
+uint32_t sw_dpdk_http_show_port(uint32_t portid, SW_DPDK_HTTP_PORT_INFO* port_info, char* buf, int buf_len);
+
+typedef struct
+{
+	uint32_t portid;
+	uint16_t delay_s;
+	uint16_t loopback;
+	uint16_t filter_len;
+	uint16_t len_mode;
+	uint16_t syn_mode;
+	uint16_t acl_mode;
+	uint16_t off_mode;
+}SW_DPDK_HTTP_FWD_INFO;
+
+uint32_t sw_dpdk_http_show_fwd(uint32_t portid, SW_DPDK_HTTP_FWD_INFO* fwd_info, char* buf, int buf_len);
+
+uint32_t sw_dpdk_http_set_fwd(uint32_t portid, SW_DPDK_HTTP_FWD_INFO* fwd_info, char* buf, int buf_len);
+
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

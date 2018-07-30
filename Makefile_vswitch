@@ -25,6 +25,32 @@ SRCS-y += src/sw_config.c
 SRCS-y += src/sw_parse.c
 SRCS-y += src/sw_filter.c
 SRCS-y += src/sw_offset.c
+#for httpserver use
+#EXTRA_CFLAGS += /run/vswitch/src/lib_httpserver/epoll_socket.o
+#EXTRA_CFLAGS += /run/vswitch/src/lib_httpserver/http_parser.o
+#EXTRA_CFLAGS += /run/vswitch/src/lib_httpserver/http_server.o
+#EXTRA_CFLAGS += /run/vswitch/src/lib_httpserver/json_reader.o
+#EXTRA_CFLAGS += /run/vswitch/src/lib_httpserver/json_value.o
+#EXTRA_CFLAGS += /run/vswitch/src/lib_httpserver/json_writer.o
+#EXTRA_CFLAGS += /run/vswitch/src/lib_httpserver/multipart_parser.o
+#EXTRA_CFLAGS += /run/vswitch/src/lib_httpserver/sim_parser.o
+#EXTRA_CFLAGS += /run/vswitch/src/lib_httpserver/simple_config.o
+#EXTRA_CFLAGS += /run/vswitch/src/lib_httpserver/simple_log.o
+#EXTRA_CFLAGS += /run/vswitch/src/lib_httpserver/sw_httpserver.o
+#EXTRA_CFLAGS += /run/vswitch/src/lib_httpserver/threadpool.o
+SRCS-y += /run/vswitch/src/lib_httpserver/epoll_socket.o
+SRCS-y += /run/vswitch/src/lib_httpserver/http_parser.o
+SRCS-y += /run/vswitch/src/lib_httpserver/http_server.o
+SRCS-y += /run/vswitch/src/lib_httpserver/json_reader.o
+SRCS-y += /run/vswitch/src/lib_httpserver/json_value.o
+SRCS-y += /run/vswitch/src/lib_httpserver/json_writer.o
+SRCS-y += /run/vswitch/src/lib_httpserver/multipart_parser.o
+SRCS-y += /run/vswitch/src/lib_httpserver/sim_parser.o
+SRCS-y += /run/vswitch/src/lib_httpserver/simple_config.o
+SRCS-y += /run/vswitch/src/lib_httpserver/simple_log.o
+SRCS-y += /run/vswitch/src/lib_httpserver/sw_httpserver.o
+SRCS-y += /run/vswitch/src/lib_httpserver/threadpool.o
+
 
 RTE_SDK=/usr/local/dpdk/share/dpdk/
 

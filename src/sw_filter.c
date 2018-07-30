@@ -48,7 +48,7 @@
 #define SW_FILTER_ADD(a)	__sync_fetch_and_add(&(a),1)
 
 /***********************start of ACL part******************************/
-#define MAX_ACL_RULE_NUM	10000
+
 #define DEFAULT_MAX_CATEGORIES	1
 #define uint32_t_to_char(ip, a, b, c, d) do {\
 		*a = (unsigned char)(ip >> 24 & 0xff);\
@@ -1271,13 +1271,107 @@ static int sw_filter_delete_rule(const char* filepath, uint32_t line_num)
 	return 0;
 }
 
-
-int sw_filter_dynamic_add_rules(char* rules, char* error, int err_len)
+uint32_t sw_filter_http_show_rules(uint32_t portid, char** rule_arr, uint32_t* rule_num, char* buf, int buf_len)
 {
+	uint32_t len = 0;
+	uint16_t i = 0;
+	uint32_t enabled_port_mask = sw_dpdk_enabled_port_mask();
+	uint32_t enabled_rx_port_mask = sw_dpdk_enabled_rx_port_mask();
+	if ((enabled_port_mask & (1 << portid)) == 0)
+	{
+		len += snprintf(buf+len, buf_len-len, "PortID:%u is not enabled, PortMask:0x%x! ", portid, enabled_port_mask);
+		return len;
+	}
+
+	if ((enabled_rx_port_mask & (1 << portid)) == 0)
+	{
+		len += snprintf(buf+len, buf_len-len, "PortID:%u is not rx mode ! ", portid);
+		return len;
+	}
+
+	struct rte_acl_rule* rule = NULL;
+	int cur_used = sw_filter_match_used;
+	int tmp_len = 0;
+	if (cur_used == SW_FILTER_MATCH_USED_0)
+	{
+		for (i = 0; i < sw_filter_acl_num[portid]; i++)
+		{
+			rule = (struct rte_acl_rule *)((uint8_t*)sw_filter_acl_rules_base[portid] + i * sizeof(struct acl4_rule));
+
+			tmp_len = 0;
+			tmp_len += snprintf(rule_arr[i]+tmp_len, SW_FILTER_SHOW_RULE_LEN - tmp_len, "rule:[%04u] ", i+1);
+			tmp_len += snprintf(rule_arr[i]+tmp_len, SW_FILTER_SHOW_RULE_LEN - tmp_len, "hit cnt:%"PRIu64" ", sw_filter_acl_stat[portid][i+1].match);
+			
+			unsigned char a, b, c, d;
+			uint32_t_to_char(rule->field[SRC_FIELD_IPV4].value.u32,
+					&a, &b, &c, &d);
+			tmp_len += snprintf(rule_arr[i]+tmp_len, SW_FILTER_SHOW_RULE_LEN - tmp_len, "%hhu.%hhu.%hhu.%hhu/%u ", a, b, c, d,
+					rule->field[SRC_FIELD_IPV4].mask_range.u32);
+			uint32_t_to_char(rule->field[DST_FIELD_IPV4].value.u32,
+					&a, &b, &c, &d);
+			tmp_len += snprintf(rule_arr[i]+tmp_len, SW_FILTER_SHOW_RULE_LEN - tmp_len, "%hhu.%hhu.%hhu.%hhu/%u ", a, b, c, d,
+					rule->field[DST_FIELD_IPV4].mask_range.u32);
+			tmp_len += snprintf(rule_arr[i]+tmp_len, SW_FILTER_SHOW_RULE_LEN - tmp_len, "%hu:%hu %hu:%hu 0x%hhx/0x%hhx ",
+				rule->field[SRCP_FIELD_IPV4].value.u16,
+				rule->field[SRCP_FIELD_IPV4].mask_range.u16,
+				rule->field[DSTP_FIELD_IPV4].value.u16,
+				rule->field[DSTP_FIELD_IPV4].mask_range.u16,
+				rule->field[PROTO_FIELD_IPV4].value.u8,
+				rule->field[PROTO_FIELD_IPV4].mask_range.u8);
+			tmp_len += snprintf(rule_arr[i]+tmp_len, SW_FILTER_SHOW_RULE_LEN - tmp_len, "0x%x-0x%x-0x%x ",
+					rule->data.category_mask,
+					rule->data.priority,
+					rule->data.userdata);
+		}
+
+		*rule_num = sw_filter_acl_num[portid];
+	}
+	else if (cur_used == SW_FILTER_MATCH_USED_1)
+	{
+		for (i = 0; i < sw_filter_acl_num_1[portid]; i++)
+		{
+			rule = (struct rte_acl_rule *)((uint8_t*)sw_filter_acl_rules_base_1[portid] + i * sizeof(struct acl4_rule));
+
+			tmp_len = 0;
+			tmp_len += snprintf(rule_arr[i]+tmp_len, SW_FILTER_SHOW_RULE_LEN - tmp_len, "rule:[%04u] ", i+1);
+			tmp_len += snprintf(rule_arr[i]+tmp_len, SW_FILTER_SHOW_RULE_LEN - tmp_len, "hit cnt:%"PRIu64" ", sw_filter_acl_stat_1[portid][i+1].match);
+			
+			unsigned char a, b, c, d;
+			uint32_t_to_char(rule->field[SRC_FIELD_IPV4].value.u32,
+					&a, &b, &c, &d);
+			tmp_len += snprintf(rule_arr[i]+tmp_len, SW_FILTER_SHOW_RULE_LEN - tmp_len, "%hhu.%hhu.%hhu.%hhu/%u ", a, b, c, d,
+					rule->field[SRC_FIELD_IPV4].mask_range.u32);
+			uint32_t_to_char(rule->field[DST_FIELD_IPV4].value.u32,
+					&a, &b, &c, &d);
+			tmp_len += snprintf(rule_arr[i]+tmp_len, SW_FILTER_SHOW_RULE_LEN - tmp_len, "%hhu.%hhu.%hhu.%hhu/%u ", a, b, c, d,
+					rule->field[DST_FIELD_IPV4].mask_range.u32);
+			tmp_len += snprintf(rule_arr[i]+tmp_len, SW_FILTER_SHOW_RULE_LEN - tmp_len, "%hu:%hu %hu:%hu 0x%hhx/0x%hhx ",
+				rule->field[SRCP_FIELD_IPV4].value.u16,
+				rule->field[SRCP_FIELD_IPV4].mask_range.u16,
+				rule->field[DSTP_FIELD_IPV4].value.u16,
+				rule->field[DSTP_FIELD_IPV4].mask_range.u16,
+				rule->field[PROTO_FIELD_IPV4].value.u8,
+				rule->field[PROTO_FIELD_IPV4].mask_range.u8);
+			tmp_len += snprintf(rule_arr[i]+tmp_len, SW_FILTER_SHOW_RULE_LEN - tmp_len, "0x%x-0x%x-0x%x  ",
+					rule->data.category_mask,
+					rule->data.priority,
+					rule->data.userdata);
+		}
+
+		*rule_num = sw_filter_acl_num_1[portid];
+	}
+
+	return len;
+}
+
+
+uint32_t sw_filter_dynamic_add_rules(char* rules, char* error, int err_len)
+{
+	uint32_t ret_len = 0;
 	if (sw_filter_single_user)
 	{
 		SW_FILTER_Log_Error("Maybe someone else is adding or deleting rules, please wait ... \n");
-		snprintf(error, err_len, "Maybe someone else is adding or deleting rules, please wait ... \n");
+		ret_len += snprintf(error, err_len, "Maybe someone else is adding or deleting rules, please wait ... \n");
 		goto _error;
 	}
 
@@ -1286,13 +1380,13 @@ int sw_filter_dynamic_add_rules(char* rules, char* error, int err_len)
 	if (-1 == ret)
 	{
 		SW_FILTER_Log_Error("Rules format error! \n");
-		snprintf(error, err_len, "Rules format error! \n");
+		ret_len += snprintf(error, err_len, "Rules format error! \n");
 		goto _error;
 	}
 	else if (-2 == ret)
 	{
 		SW_FILTER_Log_Error("Port Error! \n");
-		snprintf(error, err_len, "Port Error! \n");
+		ret_len += snprintf(error, err_len, "Port Error! \n");
 		goto _error;
 	}
 	else
@@ -1302,7 +1396,7 @@ int sw_filter_dynamic_add_rules(char* rules, char* error, int err_len)
 	if (0 != sw_filter_append_rule(SW_FILTER_CFG, rules))
 	{
 		SW_FILTER_Log_Error("Add to Rule File Error ! \n");
-		snprintf(error, err_len, "Add to Rule File Error ! \n");
+		ret_len += snprintf(error, err_len, "Add to Rule File Error ! \n");
 		goto _error;
 	}
 	else
@@ -1324,25 +1418,26 @@ int sw_filter_dynamic_add_rules(char* rules, char* error, int err_len)
 	if (0 != ret)
 	{
 		SW_FILTER_Log_Error("Internal Add Rule Error ! \n");
-		snprintf(error, err_len, "Internal Add Rule Error ! \n");
+		ret_len += snprintf(error, err_len, "Internal Add Rule Error ! \n");
 		goto _error;
 	}
 
 	sw_filter_single_user = 0;
-	return 0;
+	return ret_len;
 
 _error:
 	sw_filter_single_user = 0; 
-	return -1;
+	return ret_len;
 }
 
-int sw_filter_dynamic_del_rule(int port, int rule_id, char* error, int err_len)
+uint32_t sw_filter_dynamic_del_rule(int port, int rule_id, char* error, int err_len)
 {
 	int ret = -1;
+	uint32_t ret_len = 0;
 	if (sw_filter_single_user)
 	{
 		SW_FILTER_Log_Error("Maybe someone else is adding or deleting rules, please wait ... \n");
-		snprintf(error, err_len, "Maybe someone else is adding or deleting rules, please wait ... \n");
+		ret_len += snprintf(error, err_len, "Maybe someone else is adding or deleting rules, please wait ...");
 		goto _error;
 	}
 
@@ -1351,14 +1446,14 @@ int sw_filter_dynamic_del_rule(int port, int rule_id, char* error, int err_len)
 	if (port >= SW_DPDK_MAX_PORT)
 	{
 		SW_FILTER_Log_Error("Port Error !\n");
-		snprintf(error, err_len, "Port Error !\n");
+		ret_len += snprintf(error, err_len, "Port Error !\n");
 		goto _error;
 	}
 
 	if (rule_id > MAX_ACL_RULE_NUM || rule_id == 0)
 	{
 		SW_FILTER_Log_Error("RuleID Error !\n");
-		snprintf(error, err_len, "RuleID Error !\n");
+		ret_len += snprintf(error, err_len, "RuleID Error !\n");
 		goto _error;
 	}
 
@@ -1369,7 +1464,7 @@ int sw_filter_dynamic_del_rule(int port, int rule_id, char* error, int err_len)
 		if (!sw_filter_acl_stat[port][rule_id].used)
 		{
 			SW_FILTER_Log_Error("RuleID Not Used !\n");
-			snprintf(error, err_len, "RuleID Not Used !\n");
+			ret_len += snprintf(error, err_len, "RuleID Not Used !\n");
 			goto _error;
 		}
 		else
@@ -1380,7 +1475,7 @@ int sw_filter_dynamic_del_rule(int port, int rule_id, char* error, int err_len)
 		if (!sw_filter_acl_stat_1[port][rule_id].used)
 		{
 			SW_FILTER_Log_Error("RuleID Not Used !\n");
-			snprintf(error, err_len, "RuleID Not Used !\n");
+			ret_len += snprintf(error, err_len, "RuleID Not Used !\n");
 			goto _error;
 		}
 		else
@@ -1391,7 +1486,7 @@ int sw_filter_dynamic_del_rule(int port, int rule_id, char* error, int err_len)
 	if (0 != sw_filter_delete_rule(SW_FILTER_CFG, line_num))
 	{
 		SW_FILTER_Log_Error("Delete from Filter Rule File Error ! \n");
-		snprintf(error, err_len, "Delete from Filter Rule File Error ! \n");
+		ret_len += snprintf(error, err_len, "Delete from Filter Rule File Error ! \n");
 		goto _error;
 	}
 
@@ -1403,16 +1498,16 @@ int sw_filter_dynamic_del_rule(int port, int rule_id, char* error, int err_len)
 	if (0 != ret)
 	{
 		SW_FILTER_Log_Error("Internal Delete Rule Error ! \n");
-		snprintf(error, err_len, "Internal Delete Rule Error ! \n");
+		ret_len += snprintf(error, err_len, "Internal Delete Rule Error ! \n");
 		goto _error;
 	}
 	
 	sw_filter_single_user = 0;
-	return 0;
+	return ret_len;
 
 _error:
 	sw_filter_single_user = 0; 
-	return -1;
+	return ret_len;
 
 	
 }
