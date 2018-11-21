@@ -4,8 +4,8 @@
 #include "sw_parse.h"
 #include "sw_command.h"
 
-#define SW_OFFSET_CFG "../conf/offset.conf"
-#define SW_OFFSET_CFG_TMP "../conf/offset.conf.tmp"
+#define SW_OFFSET_CFG "/home/vswitch/conf/offset.conf"
+#define SW_OFFSET_CFG_TMP "/home/vswitch/conf/offset.conf.tmp"
 #define SW_OFFSET_MAX_NUM 10000
 #define SW_OFFSET_HS_RULE_LEN 32
 #define SW_OFFSET_SHOW_RULE_LEN 128

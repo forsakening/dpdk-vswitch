@@ -7,6 +7,7 @@
 #include "threadpool.h"
 #include "sw_httpserver.h"
 
+#include "H.h"
 #include "sw_filter.h"
 #include "sw_offset.h"
 #include "sw_dpdk.h"
@@ -229,6 +230,20 @@ void del_filter_rule(Request &request, Json::Value &root) {
 	root["ret"] = "ok";		
 }
 
+void show_all_port(Request &request, Json::Value &root) {
+	int i = 0;
+	char _error[128] = {0};
+	Json::Value jarray;
+	SW_DPDK_HTTP_ALL_PORT_INFO all_port_info = {0};
+	sw_dpdk_http_show_all_port(&all_port_info, _error, sizeof(_error));
+	for (i = 0; i < all_port_info.numofinfos; ++i) {
+		Json::Value item;
+		item["portid"] = all_port_info.infos[i].portid;
+		item["mode"] = all_port_info.infos[i].mode;
+		jarray.append(item);
+	}
+	root["result"] = jarray;
+}
 
 void show_port_info(Request &request, Json::Value &root) 
 {
@@ -266,9 +281,11 @@ void show_port_info(Request &request, Json::Value &root)
 	root["rx_bps"] = (double)port_info.rx_bps;
 	root["tx_bps"] = (double)port_info.tx_bps;
 	root["filter_len"] = (double)port_info.filter_len;
+	root["filter_max_len"] = (double)port_info.filter_max_len;
 	root["filter_acl"] = (double)port_info.filter_acl;
 	root["filter_offset"] = (double)port_info.filter_offset;
 	root["filter_syn"] = (double)port_info.filter_syn;
+	root["filter_ipv6"] = (double)port_info.filter_ipv6;
 	root["vlan_pkts"] = (double)port_info.vlan_pkts;
 	root["mpls_pkts"] = (double)port_info.mpls_pkts;
 	root["ipv4_pkts"] = (double)port_info.ipv4_pkts;
@@ -307,9 +324,14 @@ void show_fwd_rule(Request &request, Json::Value &root)
 	root["loopback"] = fwd_info.loopback;
 	root["filter_len"] = fwd_info.filter_len;
 	root["len_mode"] = fwd_info.len_mode;
+	root["filter_max_len"] = fwd_info.filter_max_len;
+	root["max_len_mode"] = fwd_info.max_len_mode;
 	root["syn_mode"] = fwd_info.syn_mode;
 	root["acl_mode"] = fwd_info.acl_mode;
 	root["off_mode"] = fwd_info.off_mode;
+	root["ipv6_mode"] = fwd_info.ipv6_mode;
+	root["vlan_mode"] = fwd_info.vlan_mode;
+	root["mpls_mode"] = fwd_info.mpls_mode;
 }
 
 void set_fwd_rule(Request &request, Json::Value &root) 
@@ -319,9 +341,14 @@ void set_fwd_rule(Request &request, Json::Value &root)
 	std::string loopback_s = request.get_param("loopback");
 	std::string filter_len_s = request.get_param("filter_len");
 	std::string len_mode_s = request.get_param("len_mode");
+	std::string filter_max_len_s = request.get_param("filter_max_len");
+	std::string max_len_mode_s = request.get_param("max_len_mode");
 	std::string syn_mode_s = request.get_param("syn_mode");
 	std::string acl_mode_s = request.get_param("acl_mode");
 	std::string off_mode_s = request.get_param("off_mode");
+	std::string ipv6_mode_s = request.get_param("ipv6_mode");
+	std::string vlan_mode_s = request.get_param("vlan_mode");
+	std::string mpls_mode_s = request.get_param("mpls_mode");
 
 	if ("" == port_s)
 	{
@@ -348,6 +375,16 @@ void set_fwd_rule(Request &request, Json::Value &root)
 		root["error"] = "len_mode Not Defined !";
 		return;
 	}
+	if ("" == filter_max_len_s)
+	{
+		root["error"] = "filter_max_len Not Defined !";
+		return;
+	}
+	if ("" == max_len_mode_s)
+	{
+		root["error"] = "max_len_mode Not Defined !";
+		return;
+	}
 	if ("" == syn_mode_s)
 	{
 		root["error"] = "syn_mode Not Defined !";
@@ -363,6 +400,21 @@ void set_fwd_rule(Request &request, Json::Value &root)
 		root["error"] = "off_mode Not Defined !";
 		return;
 	}
+	if ("" == ipv6_mode_s)
+	{
+		root["error"] = "ipv6_mode Not Defined !";
+		return;
+	}
+	if ("" == vlan_mode_s)
+	{
+		root["error"] = "vlan_mode Not Defined !";
+		return;
+	}
+	if ("" == mpls_mode_s)
+	{
+		root["error"] = "mpls_mode Not Defined !";
+		return;
+	}
 
 	char _error[128] = {0};
 	uint32_t port = atoi(port_s.c_str());
@@ -372,9 +424,14 @@ void set_fwd_rule(Request &request, Json::Value &root)
 	fwd_info.loopback = atoi(loopback_s.c_str());
 	fwd_info.filter_len = atoi(filter_len_s.c_str());
 	fwd_info.len_mode = atoi(len_mode_s.c_str());
+	fwd_info.filter_max_len = atoi(filter_max_len_s.c_str());
+	fwd_info.max_len_mode = atoi(max_len_mode_s.c_str());
 	fwd_info.syn_mode = atoi(syn_mode_s.c_str());
 	fwd_info.acl_mode = atoi(acl_mode_s.c_str());
 	fwd_info.off_mode = atoi(off_mode_s.c_str());
+	fwd_info.ipv6_mode = atoi(ipv6_mode_s.c_str());
+	fwd_info.vlan_mode = atoi(vlan_mode_s.c_str());
+	fwd_info.mpls_mode = atoi(mpls_mode_s.c_str());
 	uint32_t ret = sw_dpdk_http_set_fwd(port, &fwd_info, _error, sizeof(_error));
 	if (0 != ret)//error
 	{
@@ -383,6 +440,39 @@ void set_fwd_rule(Request &request, Json::Value &root)
 	}
 
 	root["ret"] = "ok";
+}
+void set_dsp(Request &request, Json::Value &root) 
+{
+	 FILE *pf;
+	 std::string interfacenum_s = request.get_param("interfacenum");
+	 std::string srcmac_s = request.get_param("srcmac");
+	 std::string destmac_s = request.get_param("destmac");
+	 std::string srcip_s = request.get_param("srcip");
+	 std::string destip_s = request.get_param("destip");
+	 std::string srcport_s = request.get_param("srcport");
+	 std::string destport_s = request.get_param("destport");
+	 pf = fopen("/home/vswitch/conf/udp.conf", "wb");
+	 fprintf(pf, "interfacenum %s\n", interfacenum_s.c_str());
+	 fprintf(pf, "srcmac \"%s\"\n", srcmac_s.c_str());
+	 fprintf(pf, "destmac \"%s\"\n", destmac_s.c_str());
+	 fprintf(pf, "srcip \"%s\"\n", srcip_s.c_str());
+	 fprintf(pf, "destip \"%s\"\n", destip_s.c_str());
+	 fprintf(pf, "srcport %s\n", srcport_s.c_str());
+	 fprintf(pf, "destport %s\n", destport_s.c_str());
+	 fclose(pf);
+	if (dsp_init()) {
+		root["ret"] = "ok";
+	} else {
+		root["error"] = "config init error";
+	}
+}
+void reinit_dsp(Request &request, Json::Value &root) 
+{
+	if (dsp_init()) {
+		root["ret"] = "ok";
+	} else {
+		root["error"] = "config init error";
+	}
 }
 
 static void* sw_httpserver_start(void* arg)
@@ -406,6 +496,9 @@ static void* sw_httpserver_start(void* arg)
 	http_server.add_mapping("/show_port_info", show_port_info);
 	http_server.add_mapping("/show_fwd_rule", show_fwd_rule);
 	http_server.add_mapping("/set_fwd_rule", set_fwd_rule);
+	http_server.add_mapping("/set_dsp", set_dsp);
+	http_server.add_mapping("/reinit_dsp", reinit_dsp);
+	http_server.add_mapping("/show_all_port", show_all_port);
 	
     http_server.add_bind_ip("0.0.0.0");
     http_server.set_port(sw_http_port);
@@ -418,7 +511,7 @@ static void* sw_httpserver_start(void* arg)
 }
 
 int sw_httpserver_init(int listen_port) {
-    int ret = log_init("../conf/httpserver/", "http_log.conf");
+    int ret = log_init("/home/vswitch/conf/httpserver/", "http_log.conf");
     if (ret != 0) {
         printf("log init error!");
         return -1;

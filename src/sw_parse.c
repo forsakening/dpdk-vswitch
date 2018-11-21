@@ -20,6 +20,7 @@
 #define PKT_ETHER_MPLS_MULTI_TYPE		0x8848	//多播
 #define PKT_ETHER_MACINMAC_TYPE			0x88A8	// macinmac 
 #define PKT_ETHER_IP_TYPE				0x0800  // IP
+#define PKT_ETHER_IPV6_TYPE             0x86dd
 #define PKT_ETHER_8021Q_TYPE			0x8100	// 802.1Q VLAN 
 #define PKT_ETHER_QINQ_TYPE				0x9100	// QinQ VLAN
 #define PKT_ETHER_PPPOED_TYPE			0x8863	// PPPoE 发现协议 
@@ -114,18 +115,19 @@ typedef struct
 int pkt_parse_ethhdr(PKT_INFO_S *ppkt_info);
 int pkt_parse_nethdr(PKT_INFO_S *ppkt_info);
 int pkt_parse_transhdr(PKT_INFO_S *ppkt_info);
-static int pkt_parse_vlan(uint8_t *ppkt, uint16_t pktlen, short *ptype, short *ppack_num);
-static int pkt_parse_mpls(uint8_t *ppkt, uint16_t pktlen, short *ptype, short *ppack_num);
+static int pkt_parse_vlan(uint8_t *ppkt, uint16_t pktlen, short *ptype, short *ppack_num, short* vlan_layers);
+static int pkt_parse_mpls(uint8_t *ppkt, uint16_t pktlen, short *ptype, short *ppack_num, short* mpls_layers);
 
 
 /**************************************************************************
 解析VLAN头
 ***************************************************************************/
-static int pkt_parse_vlan(uint8_t *ppkt, uint16_t pktlen, short *ptype, short *ppack_num)
+static int pkt_parse_vlan(uint8_t *ppkt, uint16_t pktlen, short *ptype, short *ppack_num, short* vlan_layers)
 {
     int  i         = 0;
     uint16_t vlan_type = 0;
     int  hdr_len   = 0;
+    short _cur_vlan_layers = (*vlan_layers);
 
     if (NULL == ppkt || 0 == pktlen || NULL == ptype || NULL == ppack_num)
         return SW_PARSE_ERR;
@@ -136,6 +138,7 @@ static int pkt_parse_vlan(uint8_t *ppkt, uint16_t pktlen, short *ptype, short *p
 		if(pktlen > sizeof(PKT_VLAN_HEADER_S))
 		{
 			(*ppack_num)++;
+            _cur_vlan_layers++;
 			hdr_len += sizeof(PKT_VLAN_HEADER_S);
 			vlan_type = ntohs(((PKT_VLAN_HEADER_S *)ppkt)->vlan_type);
 
@@ -153,17 +156,19 @@ static int pkt_parse_vlan(uint8_t *ppkt, uint16_t pktlen, short *ptype, short *p
 			break;	
 	}
 
+    *vlan_layers = _cur_vlan_layers;
     return hdr_len;
 }
 
 /**************************************************************************
 解析mpls头
 ***************************************************************************/
-static int pkt_parse_mpls(uint8_t *ppkt, uint16_t pktlen, short *ptype, short *ppack_num)
+static int pkt_parse_mpls(uint8_t *ppkt, uint16_t pktlen, short *ptype, short *ppack_num, short* mpls_layers)
 {
     int              i         = 0;
     PKT_MPLS_HEADER_S *pmpls_hdr = NULL;
     int              hdr_len   = 0;
+    short _cur_mpls_layers = (*mpls_layers);
 
     if (NULL == ppkt || 0 == pktlen || NULL == ptype || NULL == ppack_num)
         return SW_PARSE_ERR;
@@ -174,11 +179,19 @@ static int pkt_parse_mpls(uint8_t *ppkt, uint16_t pktlen, short *ptype, short *p
 		if(pktlen > sizeof(PKT_MPLS_HEADER_S))
 		{
 		    (*ppack_num)++;
+            _cur_mpls_layers++;
 			hdr_len += sizeof(PKT_MPLS_HEADER_S);
 			pmpls_hdr = (PKT_MPLS_HEADER_S *)ppkt;
 			if(1==pmpls_hdr->s)
 			{
-				*ptype = PKT_ETHER_IP_TYPE;
+			    char *ipvN = ppkt + sizeof(PKT_MPLS_HEADER_S);
+			    if ((ipvN[0] & 0xf0) == 0x60)
+                {
+                    *ptype = PKT_ETHER_IPV6_TYPE;
+                }         
+                else
+                    *ptype = PKT_ETHER_IP_TYPE;
+                
 				break;
 			}
 
@@ -189,6 +202,7 @@ static int pkt_parse_mpls(uint8_t *ppkt, uint16_t pktlen, short *ptype, short *p
 			break;
 	}
 
+    *mpls_layers = _cur_mpls_layers;
     return hdr_len;
 }
 
@@ -211,18 +225,35 @@ int sw_pkt_get_hdr(PKT_INFO_S *ppkt_info)
 	ppkt_info->mpls_flag = 0;
 	ppkt_info->vlan_flag = 0;
 	ppkt_info->ipv4_flag = 0;
+    ppkt_info->ipv6_flag = 0;
 	ppkt_info->icmp_flag = 0;
 	ppkt_info->proto = 0;
+    ppkt_info->err_reason = ERR_OK;
 
 	if(pkt_parse_ethhdr(ppkt_info)==SW_PARSE_ERR)
+    {
+        ppkt_info->err_reason = ERR_ETH;
 		return SW_PARSE_ERR;
+    }
+    
+	//@20180730 support ipv6
+	if (ppkt_info->ipv6_flag)
+		return SW_PARSE_OK;
+
 	if(pkt_parse_nethdr(ppkt_info)==SW_PARSE_ERR)
+	{
+        ppkt_info->err_reason = ERR_NET;
 		return SW_PARSE_ERR;
+    }
+    
 	if(1==ppkt_info->ipfrag_flag)
 		return SW_PARSE_OK;
 	if(pkt_parse_transhdr(ppkt_info)==SW_PARSE_ERR)
+	{
+        ppkt_info->err_reason = ERR_TRANS;
 		return SW_PARSE_ERR;
-
+    }
+    
 	return SW_PARSE_OK;
 
 }
@@ -234,6 +265,8 @@ int pkt_parse_ethhdr(PKT_INFO_S *ppkt_info)
 {
     int   eth_hdr_len  = 0;
     short   eth_pack_num = 1;
+    short   vlan_layers = 0;
+    short   mpls_layers = 0;
     char    flag_parse   = 0;
     uint8_t   *ppkt        = NULL;
     uint16_t  pktlen       = 0;
@@ -262,13 +295,19 @@ int pkt_parse_ethhdr(PKT_INFO_S *ppkt_info)
 				flag_parse = 1;
 				break;
 
+			case PKT_ETHER_IPV6_TYPE:
+				ppkt_info->ipv6_flag = 1;
+				flag_parse = 1;
+				break; 
+
 			case PKT_ETHER_8021Q_TYPE:
 			case PKT_ETHER_QINQ_TYPE:
-				eth_hdr_len = pkt_parse_vlan(ppkt, pktlen, (short *)&eth_type, &eth_pack_num);
+				eth_hdr_len = pkt_parse_vlan(ppkt, pktlen, (short *)&eth_type, &eth_pack_num, &vlan_layers);
 				if(SW_PARSE_ERR==eth_hdr_len )
 					return SW_PARSE_ERR;
 				ppkt += eth_hdr_len;
 				pktlen -= eth_hdr_len;
+                ppkt_info->vlan_layers = vlan_layers;
 				ppkt_info->vlan_flag = 1;
 				break;
 
@@ -279,11 +318,12 @@ int pkt_parse_ethhdr(PKT_INFO_S *ppkt_info)
 		        ppkt_info->pmpls_pkt = ppkt;
 		        ppkt_info->mpls_len = pktlen;
 		        
-				eth_hdr_len = pkt_parse_mpls(ppkt, pktlen, (short *)&eth_type, &eth_pack_num);
+				eth_hdr_len = pkt_parse_mpls(ppkt, pktlen, (short *)&eth_type, &eth_pack_num, &mpls_layers);
 				if(SW_PARSE_ERR==eth_hdr_len)
 					return SW_PARSE_ERR;
 				ppkt += eth_hdr_len;
 				pktlen -= eth_hdr_len;
+                ppkt_info->mpls_layers = mpls_layers;
 				break;
 				
 			default:
@@ -386,8 +426,11 @@ int pkt_parse_transhdr(PKT_INFO_S *ppkt_info)
 	        ptcp_hdr = (PKT_TCP_HEADER_S *)ppkt_info->ptrans_pkt;
 	        tcph_len = TCP_HLEN(ptcp_hdr);
 	        if ((int)sizeof(PKT_TCP_HEADER_S) > tcph_len || (0 != (tcph_len&0x03)) || tcph_len > (int)ppkt_info->trans_len)
+            {
+                //printf("Parse err: tcph_len:%d , trans_len:%d \n", tcph_len, ppkt_info->trans_len);
 				goto __trans_hdr_err;
-
+            }
+            
 	        ppkt_info->sport = TCP_SPORT(ptcp_hdr);
 	        ppkt_info->dport = TCP_DPORT(ptcp_hdr);
 	        ppkt_info->papp_pkt = ppkt_info->ptrans_pkt + tcph_len;

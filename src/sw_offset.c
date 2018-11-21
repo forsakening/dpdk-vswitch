@@ -139,7 +139,7 @@ cmd_show_offset_parsed(
 									sizeof(struct cmd_show_offset_result), 
 									buf, SW_CMD_BUFF_LEN, &len, SW_CMD_TIMEOUT);
 
-	printf("%s\n", buf);
+	cmdline_printf(cl, "%s\n", buf);
 }
 
 

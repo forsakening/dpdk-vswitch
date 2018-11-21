@@ -197,6 +197,7 @@ typedef struct
 	uint32_t used;
 	uint32_t line_num;
 	uint64_t match;
+    uint32_t rule;
 }SW_FILTER_ACL_INFO;
 
 //¹æÔò0
@@ -677,17 +678,18 @@ sw_filter_add_rules_0(const char *rule_path,
 		char sport_s[32] = {0};
 		char dport_s[32] = {0};
 		char proto_s[32] = {0};
-		if (6 != (ret = sscanf(buff, "%[^,],%[^,],%[^,],%[^,],%[^,],%[^\n]", 
-					port_s,sip_s,dip_s,sport_s,dport_s,proto_s)))
+        char rule_s[32]  = {0};
+		if (7 != (ret = sscanf(buff, "%[^,],%[^,],%[^,],%[^,],%[^,],%[^,],%[^\n]", 
+					port_s,sip_s,dip_s,sport_s,dport_s,proto_s, rule_s)))
 		{
-			SW_FILTER_Log_Error("sscanf error,ret:%d, %s-%s-%s-%s-%s-%s \n", ret,
-					port_s,sip_s,dip_s,sport_s,dport_s,proto_s);
+			SW_FILTER_Log_Error("sscanf error,ret:%d, %s-%s-%s-%s-%s-%s-%s \n", ret,
+					port_s,sip_s,dip_s,sport_s,dport_s,proto_s, rule_s);
 			fclose(fh);
 			return -1;
 		}
 		else
 		{
-			SW_FILTER_Log_Info("sscanf ok, %s-%s-%s-%s-%s-%s \n", port_s,sip_s,dip_s,sport_s,dport_s,proto_s);
+			SW_FILTER_Log_Info("sscanf ok, %s-%s-%s-%s-%s-%s-%s \n", port_s,sip_s,dip_s,sport_s,dport_s,proto_s,rule_s);
 		}
 
 		if (port_s[0] == '#' || port_s[0] == '\r' || port_s[0] == '\n')
@@ -941,7 +943,7 @@ cmd_show_acl_parsed(
 									sizeof(struct cmd_show_acl_result), 
 									buf, SW_CMD_BUFF_LEN, &len, SW_CMD_TIMEOUT);
 
-	printf("%s\n", buf);
+	cmdline_printf(cl, "%s\n", buf);
 }
 
 
@@ -954,6 +956,111 @@ cmdline_parse_inst_t cmd_show_acl = {
 		(void *)&cmd_show_acl_acl,	
 		(void *)&cmd_show_acl_port,
 		(void *)&cmd_show_acl_portid,
+		NULL,
+	},
+};
+cmdline_parse_token_string_t cmd_add_acl_add =
+	TOKEN_STRING_INITIALIZER
+		(struct cmd_add_acl_result,
+		 add, "add");
+cmdline_parse_token_string_t cmd_add_acl_acl =
+	TOKEN_STRING_INITIALIZER
+		(struct cmd_add_acl_result,
+		 acl, "acl");
+static void
+cmd_add_acl_parsed(
+	void *parsed_result,
+	__attribute__((unused)) struct cmdline *cl,
+	__attribute__((unused)) void *data)
+{
+	struct cmd_add_acl_result* res = parsed_result;
+	char cmd[2048] = { 0 };
+	char outbuf[1024] = { 0 };
+	char recvbuf[1024] = { 0 };
+	char portid[32] = { 0 };
+	char sip_mask[128] = { 0 };
+	char dip_mask[128] = { 0 };
+	char sport_range[128] = { 0 };
+	char dport_range[128] = { 0 };
+	char proto_mask[128] = { 0 };
+	if (_get_fd_message(cl, "Please Input Read PortId:\n", recvbuf, sizeof(recvbuf)) == -1)
+		return;
+	strcpy(portid, recvbuf);
+	if (_get_fd_message(cl, "Please Input SourceIp/Mask: eg. 192.168.0.1/24\n", recvbuf, sizeof(recvbuf)) == -1)
+		return;
+	strcpy(sip_mask, recvbuf);
+	if (_get_fd_message(cl, "Please Input DestIp/Mask: eg. 192.168.0.1/24\n", recvbuf, sizeof(recvbuf)) == -1)
+		return;
+	strcpy(dip_mask, recvbuf);
+	if (_get_fd_message(cl, "Please Input SourcePort Range: eg. 0:65535\n", recvbuf, sizeof(recvbuf)) == -1)
+		return;
+	strcpy(sport_range, recvbuf);
+	if (_get_fd_message(cl, "Please Input DestPort Range: eg. 0:65535\n", recvbuf, sizeof(recvbuf)) == -1)
+		return;
+	strcpy(dport_range, recvbuf);
+	if (_get_fd_message(cl, "Please Input Protocol/Mask: eg. 0x06/0xff(tcp), 0x17/0xff(udp), 0x00/0xff(any)\n", recvbuf, sizeof(recvbuf)) == -1)
+		return;
+	strcpy(proto_mask, recvbuf);
+	sprintf(cmd,"curl --connect-timeout 5 \"http://127.0.0.1:22334/add_acl_rule?rule=%s,%s,%s,%s,%s,%s\"", portid, sip_mask, dip_mask, sport_range, dport_range, proto_mask);
+	execute(cmd, outbuf);
+	if (outbuf[0] == 0) {
+		cmdline_printf(cl, "Failed: vswitch is not running...\n");
+	} else {
+		cmdline_printf(cl, "%s\n", outbuf);
+	}
+}
+cmdline_parse_inst_t cmd_add_acl = {
+	.f = cmd_add_acl_parsed,
+	.data = NULL,
+	.help_str = "add acl",
+	.tokens = {
+		(void *)&cmd_add_acl_add,
+		(void *)&cmd_add_acl_acl,	
+		NULL,
+	},
+};
+cmdline_parse_token_string_t cmd_del_acl_del =
+	TOKEN_STRING_INITIALIZER
+		(struct cmd_del_acl_result,
+		 del, "del");
+cmdline_parse_token_string_t cmd_del_acl_acl =
+	TOKEN_STRING_INITIALIZER
+		(struct cmd_del_acl_result,
+		 acl, "acl");
+cmdline_parse_token_num_t cmd_del_acl_portid =
+	TOKEN_NUM_INITIALIZER
+		(struct cmd_del_acl_result,
+		 port_id, UINT16);
+cmdline_parse_token_num_t cmd_del_acl_ruleid =
+	TOKEN_NUM_INITIALIZER
+		(struct cmd_del_acl_result,
+		 rule_id, UINT16);
+static void
+cmd_del_acl_parsed(
+	void *parsed_result,
+	__attribute__((unused)) struct cmdline *cl,
+	__attribute__((unused)) void *data)
+{
+	struct cmd_del_acl_result* res = parsed_result;
+	char cmd[2048] = { 0 };
+	char outbuf[1024] = { 0 };
+	sprintf(cmd,"curl --connect-timeout 5 \"http://127.0.0.1:22334/del_acl_rule?port=%u&ruleid=%u\"", res->port_id, res->rule_id);
+	execute(cmd, outbuf);
+	if (outbuf[0] == 0) {
+		cmdline_printf(cl, "Failed: vswitch is not running...\n");
+	} else {
+		cmdline_printf(cl, "%s\n", outbuf);
+	}
+}
+cmdline_parse_inst_t cmd_del_acl = {
+	.f = cmd_del_acl_parsed,
+	.data = NULL,
+	.help_str = "del acl <port_id> <rule_id>",
+	.tokens = {
+		(void *)&cmd_del_acl_del,
+		(void *)&cmd_del_acl_acl,	
+		(void *)&cmd_del_acl_portid,	
+		(void *)&cmd_del_acl_ruleid,	
 		NULL,
 	},
 };
@@ -1074,7 +1181,8 @@ static int sw_filter_port_1(uint16_t port_id, uint16_t SW_FILTER_UNUSED(thread_i
 
 		SW_FILTER_ADD(sw_filter_acl_stat_1[port_id][results].match);
 	
-		return 0;
+		//return 0;
+		sw_filter_acl_stat_1[port_id][results].rule;
 	}
 	
 	return -1;
@@ -1111,7 +1219,8 @@ static int sw_filter_port_0(uint16_t port_id, uint16_t SW_FILTER_UNUSED(thread_i
 
 		SW_FILTER_ADD(sw_filter_acl_stat[port_id][results].match);
 	
-		return 0;
+		//return 0;
+		return sw_filter_acl_stat[port_id][results].rule;
 	}
 	
 	return -1;

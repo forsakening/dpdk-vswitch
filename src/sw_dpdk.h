@@ -6,21 +6,28 @@
 #define SW_DPDK_MAX_CORE 128
 #define SW_DPDK_MAX_PORT 24
 #define SW_DPDK_MAX_DELAY 20
-#define SW_DPDK_MAX_MBUF_NUM 3000000 //每秒需要的报文数目
-#define SW_DPDK_MAX_TX_NUM 8
+#define SW_DPDK_MAX_MBUF_NUM 6000000 //每秒需要的报文数目
+#define SW_DPDK_MAX_TX_NUM 10
 #define SW_DPDK_Log_Error(fmt,...) printf("\033[0;32;31m[SWDPDK ERROR] \033[m"fmt, ##__VA_ARGS__);
 #define SW_DPDK_Log_Info(fmt,...) printf("\033[0;32;32m[SWDPDK INFO] \033[m"fmt, ##__VA_ARGS__);
 
-#define SW_DPDK_MBUF_LEN 1664  // % 128 == 0 split header issue
+//#define SW_DPDK_MBUF_LEN 1664  // % 128 == 0 split header issue
+#define SW_DPDK_MBUF_LEN 2048
 
-//#define SW_DPDK_Log_Debug(fmt,...) printf("\033[0;32;32m[SWDPDK DBG] \033[m"fmt, ##__VA_ARGS__);
-#define SW_DPDK_Log_Debug(fmt,...)
+
+#ifdef DEBUG_LOG
+    #define SW_DPDK_Log_Debug(fmt,...) printf("\033[0;32;32m[SWDPDK DBG] \033[m"fmt, ##__VA_ARGS__);
+#else
+    #define SW_DPDK_Log_Debug(fmt,...)
+#endif
 
 #define SW_DPDK_DEFAULT_LEN_FILTER 68
 #define SW_DPDK_PKT_LEN_MIN 60
 #define SW_DPDK_PKT_LEN_MAX 1508
 
-#define SW_DPDK_FWD_RULES_PATH "../conf/fwd_rules.conf"
+#define SW_DPDK_FWD_RULES_PATH "/home/vswitch/conf/fwd_rules.conf"
+
+#define SW_DPDK_DROP_PORT 0xffff
 
 //mode of cpu-core
 typedef enum
@@ -40,18 +47,40 @@ enum
 	SW_FILTER_LEN_DISABLE = 0,
 	SW_FILTER_LEN_RXPORT  = 1,
 	SW_FILTER_LEN_TXPORT  = 2,
+	SW_FILTER_LEN_DROP    = 3,
+
+    SW_FILTER_MAX_LEN_DISABLE = 0,
+	SW_FILTER_MAX_LEN_RXPORT  = 1,
+	SW_FILTER_MAX_LEN_TXPORT  = 2,
+	SW_FILTER_MAX_LEN_DROP    = 3,
 
 	SW_FILTER_SYN_DISABLE = 0,
 	SW_FILTER_SYN_RXPORT  = 1,
 	SW_FILTER_SYN_TXPORT  = 2,
+	SW_FILTER_SYN_DROP    = 3,
 
 	SW_FILTER_ACL_DISABLE = 0,
 	SW_FILTER_ACL_RXPORT  = 1,
 	SW_FILTER_ACL_TXPORT  = 2,
+	SW_FILTER_ACL_DROP    = 3,
+	SW_FILTER_ACL_DELAY   = 4,
 
 	SW_FILTER_OFF_DISABLE = 0,
 	SW_FILTER_OFF_RXPORT  = 1,
 	SW_FILTER_OFF_TXPORT  = 2,
+	SW_FILTER_OFF_DROP    = 3,
+	SW_FILTER_OFF_DELAY   = 4,
+
+    SW_FILTER_IP6_DISABLE = 0,
+	SW_FILTER_IP6_RXPORT  = 1,
+	SW_FILTER_IP6_TXPORT  = 2,
+	SW_FILTER_IP6_DROP    = 3,
+
+    SW_FILTER_VLANOFF_DISABLE = 0,
+    SW_FILTER_VLANOFF_ENABLE  = 1,
+
+    SW_FILTER_MPLSOFF_DISABLE = 0,
+    SW_FILTER_MPLSOFF_ENABLE  = 1,
 };
 
 typedef struct
@@ -59,11 +88,16 @@ typedef struct
 	unsigned short init;
 	
 	//tx rules 
-	unsigned short len_filter_len;
+	unsigned short len_filter_len;      //pkts shorter than this len, will do the len_filter_mode
 	unsigned short len_filter_mode;
+    unsigned short max_len_filter_len;  //pkts longer than this len, will do the max_len_filter_mode
+	unsigned short max_len_filter_mode; //like len_filter_mode
 	unsigned short syn_filter_mode;
 	unsigned short acl_filter_mode;
 	unsigned short offset_filter_mode;
+    unsigned short ipv6_filter_mode;
+    unsigned short vlan_offload_mode;
+    unsigned short mpls_offload_mode;
 }SW_PORT_PEER_FWD_RULES;
 
 typedef struct
@@ -77,6 +111,9 @@ typedef struct
 	unsigned short tx_core_num;
 	unsigned short tx_core_map[SW_DPDK_MAX_TX_NUM];
 	void*          rx_mempool;
+#if 0
+    void*          txport_rx_mempool; //即使是收包口,有的网卡也需要设置rx队列
+#endif
 	void*          cache_ring[SW_DPDK_MAX_TX_NUM];
 	void*          tx_ring[SW_DPDK_MAX_TX_NUM]; //one tx core with on tx ring	
 }SW_PORT_PEER;
@@ -84,6 +121,7 @@ typedef struct
 typedef struct
 {
 	SW_CORE_MODE core_mode;
+	int			 threadId;
 	union
 	{
 		struct
@@ -124,6 +162,7 @@ uint32_t sw_dpdk_dynamic_set_fwd(uint16_t portid,
 	                      uint16_t syn_mode,
 	                      uint16_t acl_mode,
 	                      uint16_t off_mode,
+						  uint16_t ipv6_mode,
 					      char* err, int err_len);
 
 #ifdef __cplusplus
@@ -151,14 +190,17 @@ typedef struct
 	//uint64_t tx_pps_total;			//发送的所有包
 
 	uint64_t filter_len;
+    uint64_t filter_max_len;
 	uint64_t filter_acl;
 	uint64_t filter_offset;
 	uint64_t filter_syn;
+    uint64_t filter_ipv6;
 
 	//cache - stat
 	uint64_t vlan_pkts;
 	uint64_t mpls_pkts;
 	uint64_t ipv4_pkts;
+	uint64_t ipv6_pkts;
 	uint64_t icmp_pkts;
 	uint64_t tcp_pkts;
 	uint64_t udp_pkts;
@@ -170,6 +212,15 @@ typedef struct
 	uint64_t len_512_1024;
 	uint64_t len_more_1024;
 }SW_DPDK_HTTP_PORT_INFO;
+typedef struct {
+	uint32_t portid;
+	uint32_t mode;
+}SW_DPDK_HTTP_PORT_SIMPLE_INFO;
+typedef struct {
+	SW_DPDK_HTTP_PORT_SIMPLE_INFO infos[32];
+	int numofinfos;
+}SW_DPDK_HTTP_ALL_PORT_INFO;
+uint32_t sw_dpdk_http_show_all_port(SW_DPDK_HTTP_ALL_PORT_INFO* port_info, char* buf, int buf_len);
 
 uint32_t sw_dpdk_http_show_port(uint32_t portid, SW_DPDK_HTTP_PORT_INFO* port_info, char* buf, int buf_len);
 
@@ -180,9 +231,14 @@ typedef struct
 	uint16_t loopback;
 	uint16_t filter_len;
 	uint16_t len_mode;
+    uint16_t filter_max_len;
+	uint16_t max_len_mode;
 	uint16_t syn_mode;
 	uint16_t acl_mode;
 	uint16_t off_mode;
+	uint16_t ipv6_mode;
+	uint16_t vlan_mode;
+	uint16_t mpls_mode;
 }SW_DPDK_HTTP_FWD_INFO;
 
 uint32_t sw_dpdk_http_show_fwd(uint32_t portid, SW_DPDK_HTTP_FWD_INFO* fwd_info, char* buf, int buf_len);

@@ -11,7 +11,7 @@
 #include <cmdline.h>
 
 
-#define SW_CMD_BUFF_LEN 100000  
+#define SW_CMD_BUFF_LEN 100000
 #define SW_CMD_TIMEOUT  3  // seconds
 
 typedef enum
@@ -24,6 +24,7 @@ typedef enum
 	SW_CMD_TYPE_SHOW_OFFSET,
 	SW_CMD_TYPE_SHOW_FWD,
 	SW_CMD_TYPE_SET_FWD,
+	SW_CMD_TYPE_SHOW_PORTPEER,
 }SW_CMD_TYPE;
 
 //注册设置五元组接口
@@ -57,7 +58,7 @@ int sw_command_register_show_fwd_rule(SW_CMD_SHOW_FWD_RULE);
 
 //注册修改fwd rule 接口
 //port,delay,loopback,len,len_mode,syn_mode,acl_mode,off_mode
-typedef int (* SW_CMD_SET_FWD_RULE)(uint16_t, uint16_t, uint16_t, uint16_t, uint16_t,uint16_t,uint16_t,uint16_t, char*, int);
+typedef int (* SW_CMD_SET_FWD_RULE)(uint16_t, uint16_t, uint16_t, uint16_t, uint16_t, uint16_t, uint16_t,uint16_t,uint16_t,uint16_t, uint16_t,uint16_t,uint16_t,char*, int);
 int sw_command_register_set_fwd_rule(SW_CMD_SET_FWD_RULE);
 
 
@@ -69,6 +70,8 @@ int sw_command_register_show_port(SW_CMD_SHOW_PORT);
 typedef int (* SW_KILL_SELF)(char*, int);
 int sw_command_register_kill_self(SW_KILL_SELF);
 
+typedef int (*SW_CMD_SHOW_PORTPEER_STATS)(char *, int);
+int sw_command_register_show_portpeer_stats(SW_CMD_SHOW_PORTPEER_STATS);
 
 int sw_command_client_send_and_recv(SW_CMD_TYPE cmd_type, 
 														void* cmd_buf, 

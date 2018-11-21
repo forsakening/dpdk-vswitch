@@ -61,7 +61,7 @@
 static volatile bool force_quit = false;
 static volatile bool sw_dpdk_eal_init = false;
 
-#define MAX_PKT_BURST 64
+#define MAX_PKT_BURST 32
 #define MEMPOOL_CACHE_SIZE 256
 
 #define SW_BURST_TX_DRAIN_US 100 // us 
@@ -95,11 +95,19 @@ static SW_CORE_CONF sw_core_conf[SW_DPDK_MAX_CORE] = {{0}};
 static uint32_t sw_dpdk_pps = SW_DPDK_MAX_MBUF_NUM;
 static uint32_t sw_running_seconds = 0;
 
+static uint32_t sw_idle_que_id[SW_DPDK_MAX_PORT] = {0};
+
 //用于加速
 static uint16_t sw_len_filter_tx_port[SW_DPDK_MAX_PORT] = {0};
+static uint16_t sw_max_len_filter_tx_port[SW_DPDK_MAX_PORT] = {0};
 static uint16_t sw_syn_filter_tx_port[SW_DPDK_MAX_PORT] = {0};
 static uint16_t sw_acl_filter_tx_port[SW_DPDK_MAX_PORT] = {0};
 static uint16_t sw_offset_filter_tx_port[SW_DPDK_MAX_PORT] = {0};
+static uint16_t sw_ip6_filter_tx_port[SW_DPDK_MAX_PORT] = {0};
+extern FILE *runlogF;
+
+//更新配置读写锁，只有在更新配置的一瞬间会产生竞争，其余不会导致竞争
+pthread_rwlock_t sw_config_rwlock[SW_DPDK_MAX_PORT];
 
 static struct rte_eth_conf sw_nic_conf = {
 	.rxmode = {
@@ -128,17 +136,27 @@ struct sw_dpdk_port_sw_stat{
 
 	//cache
 	uint64_t drop_by_parsed[SW_DPDK_MAX_TX_NUM];
+    uint64_t drop_by_parsed_eth[SW_DPDK_MAX_TX_NUM];
+    uint64_t drop_by_parsed_net[SW_DPDK_MAX_TX_NUM];
+    uint64_t drop_by_parsed_trans[SW_DPDK_MAX_TX_NUM];
+    
 	uint64_t deque_cache_ring[SW_DPDK_MAX_TX_NUM];
 	uint64_t enque_tx_ring[SW_DPDK_MAX_TX_NUM];
 	uint64_t filter_len[SW_DPDK_MAX_TX_NUM];
+    uint64_t filter_max_len[SW_DPDK_MAX_TX_NUM];
 	uint64_t filter_acl[SW_DPDK_MAX_TX_NUM];
 	uint64_t filter_offset[SW_DPDK_MAX_TX_NUM];
 	uint64_t filter_syn[SW_DPDK_MAX_TX_NUM];
+    uint64_t filter_ipv6[SW_DPDK_MAX_TX_NUM];
+    uint64_t filter_vlan_off[SW_DPDK_MAX_TX_NUM];
+    uint64_t filter_mpls_off_v4[SW_DPDK_MAX_TX_NUM];
+    uint64_t filter_mpls_off_v6[SW_DPDK_MAX_TX_NUM];
 
 	//cache - stat
 	uint64_t vlan_pkts[SW_DPDK_MAX_TX_NUM];
 	uint64_t mpls_pkts[SW_DPDK_MAX_TX_NUM];
 	uint64_t ipv4_pkts[SW_DPDK_MAX_TX_NUM];
+    uint64_t ipv6_pkts[SW_DPDK_MAX_TX_NUM];
 	uint64_t icmp_pkts[SW_DPDK_MAX_TX_NUM];
 	uint64_t tcp_pkts[SW_DPDK_MAX_TX_NUM];
 	uint64_t udp_pkts[SW_DPDK_MAX_TX_NUM];
@@ -152,6 +170,7 @@ struct sw_dpdk_port_sw_stat{
 	
 	//tx -stat
 	uint64_t deque_tx_ring[SW_DPDK_MAX_TX_NUM];
+    uint64_t deque_tx_interface[SW_DPDK_MAX_TX_NUM];
 } __rte_cache_aligned;
 struct sw_dpdk_port_sw_stat port_sw_stat[SW_DPDK_MAX_PORT];
 
@@ -178,6 +197,15 @@ struct sw_tx_buffer_para
 };
 struct sw_tx_buffer_para sw_tx_buffer_p_q[SW_DPDK_MAX_PORT][SW_DPDK_MAX_TX_NUM] = {{{0}}};
 
+static void sw_dpdk_config_rwlock_init(void)
+{
+    int i = 0;
+    for (; i < SW_DPDK_MAX_PORT; i++)
+    {
+        pthread_rwlock_init(&sw_config_rwlock[i], NULL);
+    }
+}
+    
 uint32_t sw_dpdk_enabled_rx_port_mask(void)
 {
 	return sw_used_rx_port_mask;
@@ -318,25 +346,49 @@ static int sw_dpdk_make_fwd_rules(void)
 			sw_len_filter_tx_port[i] = i;
 		else if (sw_port_peer_fwd_rules[i].len_filter_mode == SW_FILTER_LEN_TXPORT)
 			sw_len_filter_tx_port[i] = sw_port_peer[i].tx_port;
+        else if (sw_port_peer_fwd_rules[i].len_filter_mode == SW_FILTER_LEN_DROP)
+            sw_len_filter_tx_port[i] = SW_DPDK_DROP_PORT;
+
+        if (sw_port_peer_fwd_rules[i].max_len_filter_mode == SW_FILTER_MAX_LEN_RXPORT)
+			sw_max_len_filter_tx_port[i] = i;
+		else if (sw_port_peer_fwd_rules[i].max_len_filter_mode == SW_FILTER_MAX_LEN_TXPORT)
+			sw_max_len_filter_tx_port[i] = sw_port_peer[i].tx_port;
+        else if (sw_port_peer_fwd_rules[i].max_len_filter_mode == SW_FILTER_MAX_LEN_DROP)
+            sw_max_len_filter_tx_port[i] = SW_DPDK_DROP_PORT;
 		
 		if (sw_port_peer_fwd_rules[i].syn_filter_mode == SW_FILTER_SYN_RXPORT)
 			sw_syn_filter_tx_port[i] = i;
 		else if (sw_port_peer_fwd_rules[i].syn_filter_mode == SW_FILTER_SYN_TXPORT)
 			sw_syn_filter_tx_port[i] = sw_port_peer[i].tx_port;
+        else if (sw_port_peer_fwd_rules[i].syn_filter_mode == SW_FILTER_SYN_DROP)
+            sw_syn_filter_tx_port[i] = SW_DPDK_DROP_PORT;
 
 		if (sw_port_peer_fwd_rules[i].acl_filter_mode == SW_FILTER_ACL_RXPORT)
 			sw_acl_filter_tx_port[i] = i;
 		else if (sw_port_peer_fwd_rules[i].acl_filter_mode == SW_FILTER_ACL_TXPORT)
 			sw_acl_filter_tx_port[i] = sw_port_peer[i].tx_port;
+        else if (sw_port_peer_fwd_rules[i].acl_filter_mode == SW_FILTER_ACL_DROP)
+			sw_acl_filter_tx_port[i] = SW_DPDK_DROP_PORT;
 
 		if (sw_port_peer_fwd_rules[i].offset_filter_mode == SW_FILTER_OFF_RXPORT)
 			sw_offset_filter_tx_port[i] = i;
 		else if (sw_port_peer_fwd_rules[i].offset_filter_mode == SW_FILTER_OFF_TXPORT)
 			sw_offset_filter_tx_port[i] = sw_port_peer[i].tx_port;
+        else if (sw_port_peer_fwd_rules[i].offset_filter_mode == SW_FILTER_OFF_DROP)
+			sw_offset_filter_tx_port[i] = SW_DPDK_DROP_PORT;
 
-		SW_DPDK_Log_Info("FWDRULE Port:%u-%u  len:%u  syn:%u  acl:%u off:%u \n", i, sw_port_peer[i].tx_port,
-			             sw_len_filter_tx_port[i], sw_syn_filter_tx_port[i], 
-			             sw_acl_filter_tx_port[i], sw_offset_filter_tx_port[i]);
+        if (sw_port_peer_fwd_rules[i].ipv6_filter_mode == SW_FILTER_IP6_RXPORT)
+			sw_ip6_filter_tx_port[i] = i;
+		else if (sw_port_peer_fwd_rules[i].ipv6_filter_mode == SW_FILTER_IP6_TXPORT)
+			sw_ip6_filter_tx_port[i] = sw_port_peer[i].tx_port;
+        else if (sw_port_peer_fwd_rules[i].ipv6_filter_mode == SW_FILTER_IP6_DROP)
+			sw_ip6_filter_tx_port[i] = SW_DPDK_DROP_PORT;
+        
+
+		SW_DPDK_Log_Info("FWDRULE Port:%u-%u  len:%u maxlen:%u syn:%u  acl:%u off:%u ip6:%u \n", i, sw_port_peer[i].tx_port,
+			             sw_len_filter_tx_port[i], sw_max_len_filter_tx_port[i], sw_syn_filter_tx_port[i], 
+			             sw_acl_filter_tx_port[i], sw_offset_filter_tx_port[i],
+			             sw_ip6_filter_tx_port[i]);
 	}
 
 	return 0;
@@ -349,9 +401,14 @@ static int sw_dpdk_init_fwd_rules(void)
 	{
 		sw_port_peer_fwd_rules[i].len_filter_len = SW_DPDK_DEFAULT_LEN_FILTER;
 		sw_port_peer_fwd_rules[i].len_filter_mode = SW_FILTER_LEN_TXPORT;
+        sw_port_peer_fwd_rules[i].max_len_filter_len = SW_DPDK_PKT_LEN_MAX;
+		sw_port_peer_fwd_rules[i].max_len_filter_mode = SW_FILTER_MAX_LEN_DISABLE;
 		sw_port_peer_fwd_rules[i].syn_filter_mode = SW_FILTER_SYN_TXPORT;
 		sw_port_peer_fwd_rules[i].acl_filter_mode = SW_FILTER_ACL_TXPORT;
 		sw_port_peer_fwd_rules[i].offset_filter_mode = SW_FILTER_OFF_TXPORT;
+        sw_port_peer_fwd_rules[i].ipv6_filter_mode = SW_FILTER_IP6_TXPORT;
+        sw_port_peer_fwd_rules[i].vlan_offload_mode = SW_FILTER_VLANOFF_DISABLE;
+        sw_port_peer_fwd_rules[i].mpls_offload_mode = SW_FILTER_MPLSOFF_DISABLE;
 	}
 
 	return 0;
@@ -374,9 +431,16 @@ static int sw_dpdk_setup_fwd_rules(uint16_t rx_port, SW_PORT_PEER_FWD_RULES* fwd
 	uint16_t loopback = sw_port_peer[rx_port].loopback;
 	if (loopback)
 	{
+	    //若开启了环回模式，但仍然配置过滤规则发给rx口，则可能出现rx口超过线速的情况
 		if (fwd_rules->len_filter_mode == SW_FILTER_LEN_RXPORT)
 		{
 			SW_DPDK_Log_Error("[sw_dpdk_setup_fwd_rules] RxPort:%u is loopback, len filter mode may not be 1 !\n", rx_port);
+			return -1;
+		}
+
+        if (fwd_rules->max_len_filter_mode == SW_FILTER_MAX_LEN_RXPORT)
+		{
+			SW_DPDK_Log_Error("[sw_dpdk_setup_fwd_rules] RxPort:%u is loopback, max len filter mode may not be 1 !\n", rx_port);
 			return -1;
 		}
 
@@ -397,15 +461,24 @@ static int sw_dpdk_setup_fwd_rules(uint16_t rx_port, SW_PORT_PEER_FWD_RULES* fwd
 			SW_DPDK_Log_Error("[sw_dpdk_setup_fwd_rules] RxPort:%u is loopback, offset filter mode may not be 1 !\n", rx_port);
 			return -1;
 		}
+
+        if (fwd_rules->ipv6_filter_mode == SW_FILTER_IP6_RXPORT)
+		{
+			SW_DPDK_Log_Error("[sw_dpdk_setup_fwd_rules] RxPort:%u is loopback, ipv6 filter mode may not be 1 !\n", rx_port);
+			return -1;
+		}
 	}
 
 	uint16_t tx_port = sw_port_peer[rx_port].tx_port;
 	memcpy(&sw_port_peer_fwd_rules[rx_port], fwd_rules, sizeof(SW_PORT_PEER_FWD_RULES));
 	memcpy(&sw_port_peer_fwd_rules[tx_port], fwd_rules, sizeof(SW_PORT_PEER_FWD_RULES));
 
-	SW_DPDK_Log_Info("sw_dpdk_setup_fwd_rules,RxPort:%u LoopBack:%u FilterLen:%u LenMode:%u SynMode:%u AclMode:%u OffMode:%u \n",
-		rx_port, sw_port_peer[rx_port].loopback, sw_port_peer_fwd_rules[rx_port].len_filter_len, sw_port_peer_fwd_rules[rx_port].len_filter_mode, 
-		sw_port_peer_fwd_rules[rx_port].syn_filter_mode, sw_port_peer_fwd_rules[rx_port].acl_filter_mode, sw_port_peer_fwd_rules[rx_port].offset_filter_mode);
+	SW_DPDK_Log_Info("sw_dpdk_setup_fwd_rules,RxPort:%u LoopBack:%u FilterLen:%u LenMode:%u MaxFilterLen:%u MaxLenMode:%u SynMode:%u AclMode:%u OffMode:%u Ip6Mode:%u VlanMode:%u MplsMode:%u\n",
+		rx_port, sw_port_peer[rx_port].loopback, sw_port_peer_fwd_rules[rx_port].len_filter_len, sw_port_peer_fwd_rules[rx_port].len_filter_mode,
+		sw_port_peer_fwd_rules[rx_port].max_len_filter_len, sw_port_peer_fwd_rules[rx_port].max_len_filter_mode,
+		sw_port_peer_fwd_rules[rx_port].syn_filter_mode, sw_port_peer_fwd_rules[rx_port].acl_filter_mode, 
+		sw_port_peer_fwd_rules[rx_port].offset_filter_mode,sw_port_peer_fwd_rules[rx_port].ipv6_filter_mode,
+		sw_port_peer_fwd_rules[rx_port].vlan_offload_mode, sw_port_peer_fwd_rules[rx_port].mpls_offload_mode);
 
 	return 0;
 }
@@ -461,12 +534,13 @@ static int sw_dpdk_setup_buffer(uint16_t rx_port)
 	int mbuf_num = delay * sw_dpdk_pps;
 	if (0 == mbuf_num)
 		mbuf_num = sw_dpdk_pps;
-	
-	char mbuf_name[32] = {0};
-	sprintf(mbuf_name, "mbuf_pool_%d", rx_port);
-	int socket_id = rte_eth_dev_socket_id(rx_port);
+
+    int socket_id = rte_eth_dev_socket_id(rx_port);
 	if (socket_id < 0)
 		socket_id = SOCKET_ID_ANY;
+    
+	char mbuf_name[32] = {0};
+	sprintf(mbuf_name, "mbuf_pool_%d_core_%d", rx_port, socket_id);    
 	sw_port_peer[rx_port].rx_mempool = (void *)rte_pktmbuf_pool_create(mbuf_name, mbuf_num, MEMPOOL_CACHE_SIZE, 0, 
 						SW_DPDK_MBUF_TOTAL, socket_id);
 	if (NULL == sw_port_peer[rx_port].rx_mempool)
@@ -474,6 +548,18 @@ static int sw_dpdk_setup_buffer(uint16_t rx_port)
 		SW_DPDK_Log_Error("rx port : %u init mbuf error,mbuf num %d ! \n", rx_port, mbuf_num);
 		return -1;
 	}
+
+#if 0
+    char txport_rx_mbuf_name[32] = {0};
+    sprintf(txport_rx_mbuf_name, "txport_%d_core_%d", rx_port, socket_id); 
+    sw_port_peer[rx_port].txport_rx_mempool = (void *)rte_pktmbuf_pool_create(txport_rx_mbuf_name, 4096, MEMPOOL_CACHE_SIZE, 0, 
+						SW_DPDK_MBUF_TOTAL, socket_id);
+    if (NULL == sw_port_peer[rx_port].txport_rx_mempool)
+    {
+        SW_DPDK_Log_Error("rx port : %u init peer tx-port rx mbuf error,mbuf num %d ! \n", rx_port, txport_rx_mbuf_name);
+		return -1;
+    }
+#endif
 
 	uint16_t tx_core;
 	uint16_t tx_port = sw_port_peer[rx_port].tx_port;
@@ -753,8 +839,29 @@ static int sw_dpdk_init_port(void)
 				return -1;
 			}
 				
-			/* init one TX queue on each port */
 			fflush(stdout);
+
+#if 0
+            mpool = sw_port_peer[portid].txport_rx_mempool;
+			if (NULL == mpool)
+			{
+				SW_DPDK_Log_Error("Tx Port %u rx-mpool null !\n", portid);
+				return -1;
+			}
+
+			rxq_conf = dev_info.default_rxconf;
+			rxq_conf.offloads = local_port_conf.rxmode.offloads;
+			ret = rte_eth_rx_queue_setup(portid, 0, nb_rxd,
+						     rte_eth_dev_socket_id(portid),
+						     &rxq_conf,
+						     mpool);
+			if (ret < 0)
+			{
+				SW_DPDK_Log_Error("tx port rte_eth_rx_queue_setup:err=%d, port=%u\n", ret, portid);
+				return -1;
+			}
+#endif
+            
 			txq_conf = dev_info.default_txconf;
 			txq_conf.txq_flags = ETH_TXQ_FLAGS_IGNORE;
 			txq_conf.offloads = local_port_conf.txmode.offloads;
@@ -842,6 +949,52 @@ static void sw_dpdk_calc_per_second(void)
     }
 }
 
+static void* sw_dpdk_calc_idle_que_thread(void* parg)
+{
+    if (!parg)
+		printf("Start to thread %s \n", __FUNCTION__);
+
+    uint32_t port_id;
+    while(1)
+    {
+        if (!start_work)
+        {
+            usleep(100);
+            continue;
+        }
+        
+        for (port_id = 0; port_id < SW_DPDK_MAX_PORT; port_id++)
+        {
+        	if ((sw_used_port_mask & (1 << port_id)) == 0)
+        		continue;
+
+            if (sw_port_mode_map[port_id] != SW_PORT_RX)
+                continue;
+
+            uint32_t idle_id = 0;
+            uint32_t i = 0;
+            unsigned cur_ring_free_cnt,max_ring_free_cnt = 0;
+            struct rte_ring* pring_rx = NULL;
+            struct rte_ring* pring_tx = NULL;
+            for (; i < sw_port_peer[port_id].tx_core_num; i++)
+            {
+                pring_rx = sw_port_peer[port_id].cache_ring[i];
+                pring_tx = sw_port_peer[port_id].tx_ring[i];
+                cur_ring_free_cnt = rte_ring_free_count(pring_rx) + rte_ring_free_count(pring_tx);
+                if (max_ring_free_cnt < cur_ring_free_cnt)
+                {
+                    max_ring_free_cnt = cur_ring_free_cnt;
+                    idle_id = i;
+                }  
+            }
+
+            sw_idle_que_id[port_id] = idle_id;
+        }
+
+        usleep(100);
+    }
+}
+
 static void* sw_dpdk_calc_statistic_thread(void* parg)
 {
 	if (!parg)
@@ -926,14 +1079,19 @@ static int sw_dpdk_show_fwd(uint16_t portid, char* buf, int buf_len)
 	}
 
 	len += snprintf(buf+len, buf_len-len, "FWD--Rule: \n");
-	len += snprintf(buf+len, buf_len-len, "    LoopBack: %u \n", sw_port_peer[portid].loopback);
-	len += snprintf(buf+len, buf_len-len, "    Delay   : %u \n", sw_port_peer[portid].delay_s);
-	len += snprintf(buf+len, buf_len-len, "    Len     : %u \n", sw_port_peer_fwd_rules[portid].len_filter_len);
-	len += snprintf(buf+len, buf_len-len, "    Len-Mode: %u \n", sw_port_peer_fwd_rules[portid].len_filter_mode);
-	len += snprintf(buf+len, buf_len-len, "    Syn-Mode: %u \n", sw_port_peer_fwd_rules[portid].syn_filter_mode);
-	len += snprintf(buf+len, buf_len-len, "    Acl-Mode: %u \n", sw_port_peer_fwd_rules[portid].acl_filter_mode);
-	len += snprintf(buf+len, buf_len-len, "    Off-Mode: %u \n", sw_port_peer_fwd_rules[portid].offset_filter_mode);
-
+	len += snprintf(buf+len, buf_len-len, "    LoopBack    : %u \n", sw_port_peer[portid].loopback);
+	len += snprintf(buf+len, buf_len-len, "    Delay       : %u \n", sw_port_peer[portid].delay_s);
+	len += snprintf(buf+len, buf_len-len, "    Len         : %u \n", sw_port_peer_fwd_rules[portid].len_filter_len);
+	len += snprintf(buf+len, buf_len-len, "    Len-Mode    : %u \n", sw_port_peer_fwd_rules[portid].len_filter_mode);
+    len += snprintf(buf+len, buf_len-len, "    MaxLen      : %u \n", sw_port_peer_fwd_rules[portid].max_len_filter_len);
+	len += snprintf(buf+len, buf_len-len, "    MaxLen-Mode : %u \n", sw_port_peer_fwd_rules[portid].max_len_filter_mode);
+	len += snprintf(buf+len, buf_len-len, "    Syn-Mode    : %u \n", sw_port_peer_fwd_rules[portid].syn_filter_mode);
+	len += snprintf(buf+len, buf_len-len, "    Acl-Mode    : %u \n", sw_port_peer_fwd_rules[portid].acl_filter_mode);
+	len += snprintf(buf+len, buf_len-len, "    Off-Mode    : %u \n", sw_port_peer_fwd_rules[portid].offset_filter_mode);
+    len += snprintf(buf+len, buf_len-len, "    IP6-Mode    : %u \n", sw_port_peer_fwd_rules[portid].ipv6_filter_mode);
+    len += snprintf(buf+len, buf_len-len, "    VLAN-Mode   : %u \n", sw_port_peer_fwd_rules[portid].vlan_offload_mode);
+    len += snprintf(buf+len, buf_len-len, "    MPLS-Mode   : %u \n", sw_port_peer_fwd_rules[portid].mpls_offload_mode);
+    
 	return len;
 }
 
@@ -942,11 +1100,31 @@ static int sw_dpdk_set_fwd(uint16_t portid,
 	                             uint16_t loopback,
 	                             uint16_t filter_len,
 	                             uint16_t len_mode,
+	                             uint16_t max_filter_len,
+	                             uint16_t max_len_mode,
 	                             uint16_t syn_mode,
 	                             uint16_t acl_mode,
 	                             uint16_t off_mode,
+								 uint16_t ipv6_mode,
+								 uint16_t vlan_offload_mode,
+								 uint16_t mpls_offload_mode,
 								 char* buf, int buf_len)
 {
+    SW_DPDK_Log_Info("Get %d %d %d %d %d %d %d %d %d %d %d %d %d \n", 
+                                  portid,
+	                              delay_s,
+	                              loopback,
+	                              filter_len,
+	                              len_mode,
+	                              max_filter_len,
+	                              max_len_mode,
+	                              syn_mode,
+	                              acl_mode,
+	                              off_mode,
+								  ipv6_mode,
+								  vlan_offload_mode,
+								  mpls_offload_mode);
+
 	int len = 0;
 	if ((sw_enabled_port_mask & (1 << portid)) == 0)
 	{
@@ -980,6 +1158,12 @@ static int sw_dpdk_set_fwd(uint16_t portid,
 			return len;
 		}
 
+        if (max_len_mode == SW_FILTER_MAX_LEN_RXPORT)
+		{
+			len += snprintf(buf+len, buf_len-len, "loopback, max-len-mode should not be 1 ... \n");
+			return len;
+		}
+
 		if (syn_mode == SW_FILTER_SYN_RXPORT)
 		{
 			len += snprintf(buf+len, buf_len-len, "loopback, syn-mode should not be 1 ... \n");
@@ -991,39 +1175,64 @@ static int sw_dpdk_set_fwd(uint16_t portid,
 			len += snprintf(buf+len, buf_len-len, "loopback, offset-mode should not be 1 ... \n");
 			return len;
 		}
+
+        if (ipv6_mode == SW_FILTER_IP6_RXPORT)
+		{
+			len += snprintf(buf+len, buf_len-len, "loopback, ipv6-mode should not be 1 ... \n");
+			return len;
+		}
 	}
 
-	if (filter_len <= SW_DPDK_PKT_LEN_MIN || SW_DPDK_PKT_LEN_MIN >= filter_len)
+	if (filter_len < SW_DPDK_PKT_LEN_MIN || SW_DPDK_PKT_LEN_MAX < filter_len)
 	{
-		len += snprintf(buf+len, buf_len-len, "len : %u  error \n", filter_len);
+		len += snprintf(buf+len, buf_len-len, "len : %u  error, must in [%d-%d] \n", filter_len, SW_DPDK_PKT_LEN_MIN, SW_DPDK_PKT_LEN_MAX);
 		return len;
 	}
 
-	if ( SW_FILTER_LEN_TXPORT < len_mode)
+	if ( SW_FILTER_LEN_DROP < len_mode)
 	{
 		len += snprintf(buf+len, buf_len-len, "len-mode : %u  error \n", len_mode);
 		return len;
 	}
 
-	if (SW_FILTER_SYN_TXPORT < syn_mode)
+    if (max_filter_len < SW_DPDK_PKT_LEN_MIN || SW_DPDK_PKT_LEN_MAX < max_filter_len)
+	{
+		len += snprintf(buf+len, buf_len-len, "max-len : %u  error, must in [%d-%d] \n", max_filter_len, SW_DPDK_PKT_LEN_MIN, SW_DPDK_PKT_LEN_MAX);
+		return len;
+	}
+
+	if ( SW_FILTER_MAX_LEN_DROP < max_len_mode)
+	{
+		len += snprintf(buf+len, buf_len-len, "max-len-mode : %u  error \n", max_len_mode);
+		return len;
+	}
+
+	if (SW_FILTER_SYN_DROP < syn_mode)
 	{
 		len += snprintf(buf+len, buf_len-len, "syn-mode : %u  error \n", syn_mode);
 		return len;
 	}
 
-	if (SW_FILTER_ACL_TXPORT < acl_mode)
+	if (SW_FILTER_ACL_DROP < acl_mode)
 	{
 		len += snprintf(buf+len, buf_len-len, "acl-mode : %u  error \n", acl_mode);
 		return len;
 	}
 	
-	if (SW_FILTER_OFF_TXPORT < off_mode)
+	if (SW_FILTER_OFF_DROP < off_mode)
 	{
 		len += snprintf(buf+len, buf_len-len, "off-mode : %u  error \n", off_mode);
 		return len;
 	}
 
+	if (SW_FILTER_IP6_DROP < ipv6_mode) {
+		len += snprintf(buf+len, buf_len-len, "ipv6-mode : %u  error \n", ipv6_mode);
+		return len;
+	}
+
 	//update , maybe need to lock
+    pthread_rwlock_wrlock(&sw_config_rwlock[portid]);//请求写锁
+    
 	uint32_t tx_port = sw_port_peer[portid].tx_port;
 	sw_port_peer[portid].loopback = loopback;
 	sw_port_peer[portid].delay_s = delay_s;
@@ -1032,29 +1241,147 @@ static int sw_dpdk_set_fwd(uint16_t portid,
 	
 	sw_port_peer_fwd_rules[portid].len_filter_len = filter_len;
 	sw_port_peer_fwd_rules[portid].len_filter_mode = len_mode;
+    sw_port_peer_fwd_rules[portid].max_len_filter_len = max_filter_len;
+	sw_port_peer_fwd_rules[portid].max_len_filter_mode = max_len_mode;
 	sw_port_peer_fwd_rules[portid].syn_filter_mode = syn_mode;
 	sw_port_peer_fwd_rules[portid].acl_filter_mode = acl_mode;
 	sw_port_peer_fwd_rules[portid].offset_filter_mode = off_mode;
-	
-	len += snprintf(buf+len, buf_len-len, "FWD Rule: \n");
-	len += snprintf(buf+len, buf_len-len, "    LoopBack: %u \n", sw_port_peer[portid].loopback);
-	len += snprintf(buf+len, buf_len-len, "    Delay   : %u \n", sw_port_peer[portid].delay_s);
-	len += snprintf(buf+len, buf_len-len, "    Len     : %u \n", sw_port_peer_fwd_rules[portid].len_filter_len);
-	len += snprintf(buf+len, buf_len-len, "    Len-Mode: %u \n", sw_port_peer_fwd_rules[portid].len_filter_mode);
-	len += snprintf(buf+len, buf_len-len, "    Syn-Mode: %u \n", sw_port_peer_fwd_rules[portid].syn_filter_mode);
-	len += snprintf(buf+len, buf_len-len, "    Acl-Mode: %u \n", sw_port_peer_fwd_rules[portid].acl_filter_mode);
-	len += snprintf(buf+len, buf_len-len, "    Off-Mode: %u \n", sw_port_peer_fwd_rules[portid].offset_filter_mode);
-	len += snprintf(buf+len, buf_len-len, "\nSet Ok ! \n");
+	sw_port_peer_fwd_rules[portid].ipv6_filter_mode = ipv6_mode;
+	sw_port_peer_fwd_rules[portid].vlan_offload_mode = vlan_offload_mode;
+	sw_port_peer_fwd_rules[portid].mpls_offload_mode = mpls_offload_mode;
 
-	uint32_t i = 0;
+    uint32_t i = 0;
 	sw_port_need_update_rx[portid] = 1;
 	for (; i < sw_port_peer[portid].tx_core_num; i++)
 		sw_port_need_update_tx[tx_port][i] = 1;
+
+    //更新加速配置
+    unsigned short rx_port = portid;
+    if (sw_port_peer_fwd_rules[rx_port].len_filter_mode == SW_FILTER_LEN_RXPORT)
+		sw_len_filter_tx_port[rx_port] = rx_port;
+	else if (sw_port_peer_fwd_rules[rx_port].len_filter_mode == SW_FILTER_LEN_TXPORT)
+		sw_len_filter_tx_port[rx_port] = tx_port;
+    else if (sw_port_peer_fwd_rules[rx_port].len_filter_mode == SW_FILTER_LEN_DROP)
+		sw_len_filter_tx_port[rx_port] = SW_DPDK_DROP_PORT;
+
+    if (sw_port_peer_fwd_rules[rx_port].max_len_filter_mode == SW_FILTER_MAX_LEN_RXPORT)
+		sw_max_len_filter_tx_port[rx_port] = rx_port;
+	else if (sw_port_peer_fwd_rules[rx_port].max_len_filter_mode == SW_FILTER_MAX_LEN_TXPORT)
+		sw_max_len_filter_tx_port[rx_port] = tx_port;
+    else if (sw_port_peer_fwd_rules[rx_port].max_len_filter_mode == SW_FILTER_MAX_LEN_DROP)
+		sw_max_len_filter_tx_port[rx_port] = SW_DPDK_DROP_PORT;
+	
+	if (sw_port_peer_fwd_rules[rx_port].syn_filter_mode == SW_FILTER_SYN_RXPORT)
+		sw_syn_filter_tx_port[rx_port] = rx_port;
+	else if (sw_port_peer_fwd_rules[rx_port].syn_filter_mode == SW_FILTER_SYN_TXPORT)
+		sw_syn_filter_tx_port[rx_port] = tx_port;
+    else if (sw_port_peer_fwd_rules[rx_port].syn_filter_mode == SW_FILTER_SYN_DROP)
+		sw_syn_filter_tx_port[rx_port] = SW_DPDK_DROP_PORT;
+
+	if (sw_port_peer_fwd_rules[rx_port].acl_filter_mode == SW_FILTER_ACL_RXPORT)
+		sw_acl_filter_tx_port[rx_port] = rx_port;
+	else if (sw_port_peer_fwd_rules[rx_port].acl_filter_mode == SW_FILTER_ACL_TXPORT)
+		sw_acl_filter_tx_port[rx_port] = tx_port;
+    else if (sw_port_peer_fwd_rules[rx_port].acl_filter_mode == SW_FILTER_ACL_DROP)
+		sw_acl_filter_tx_port[rx_port] = SW_DPDK_DROP_PORT;
+
+	if (sw_port_peer_fwd_rules[rx_port].offset_filter_mode == SW_FILTER_OFF_RXPORT)
+		sw_offset_filter_tx_port[rx_port] = rx_port;
+	else if (sw_port_peer_fwd_rules[rx_port].offset_filter_mode == SW_FILTER_OFF_TXPORT)
+		sw_offset_filter_tx_port[rx_port] = tx_port;
+    else if (sw_port_peer_fwd_rules[rx_port].offset_filter_mode == SW_FILTER_OFF_DROP)
+		sw_offset_filter_tx_port[rx_port] = SW_DPDK_DROP_PORT;
+
+    if (sw_port_peer_fwd_rules[rx_port].ipv6_filter_mode == SW_FILTER_IP6_RXPORT)
+		sw_ip6_filter_tx_port[rx_port] = rx_port;
+	else if (sw_port_peer_fwd_rules[rx_port].ipv6_filter_mode == SW_FILTER_IP6_TXPORT)
+		sw_ip6_filter_tx_port[rx_port] = tx_port;
+    else if (sw_port_peer_fwd_rules[rx_port].ipv6_filter_mode == SW_FILTER_IP6_DROP)
+		sw_ip6_filter_tx_port[rx_port] = SW_DPDK_DROP_PORT;
+
+    pthread_rwlock_unlock(&sw_config_rwlock[portid]);//释放写锁
+
+    SW_DPDK_Log_Info("CMD Start to update conf rxport:%d len-port:%d max-len-port:%d syn-port:%d acl-port:%d off-port:%d ipv6-port:%d ... \n", rx_port,
+                    sw_len_filter_tx_port[rx_port], sw_max_len_filter_tx_port[rx_port], sw_syn_filter_tx_port[rx_port],
+                    sw_acl_filter_tx_port[rx_port], sw_offset_filter_tx_port[rx_port], sw_ip6_filter_tx_port[rx_port]);
+	
+	len += snprintf(buf+len, buf_len-len, "FWD Rule: \n");
+	len += snprintf(buf+len, buf_len-len, "    LoopBack   : %u \n", sw_port_peer[portid].loopback);
+	len += snprintf(buf+len, buf_len-len, "    Delay      : %u \n", sw_port_peer[portid].delay_s);
+	len += snprintf(buf+len, buf_len-len, "    Len        : %u \n", sw_port_peer_fwd_rules[portid].len_filter_len);
+	len += snprintf(buf+len, buf_len-len, "    Len-Mode   : %u \n", sw_port_peer_fwd_rules[portid].len_filter_mode);
+    len += snprintf(buf+len, buf_len-len, "    MaxLen     : %u \n", sw_port_peer_fwd_rules[portid].max_len_filter_len);
+	len += snprintf(buf+len, buf_len-len, "    MaxLen-Mode: %u \n", sw_port_peer_fwd_rules[portid].max_len_filter_mode);
+	len += snprintf(buf+len, buf_len-len, "    Syn-Mode   : %u \n", sw_port_peer_fwd_rules[portid].syn_filter_mode);
+	len += snprintf(buf+len, buf_len-len, "    Acl-Mode   : %u \n", sw_port_peer_fwd_rules[portid].acl_filter_mode);
+	len += snprintf(buf+len, buf_len-len, "    Off-Mode   : %u \n", sw_port_peer_fwd_rules[portid].offset_filter_mode);
+	len += snprintf(buf+len, buf_len-len, "    Ipv6-Mode  : %u \n", sw_port_peer_fwd_rules[portid].ipv6_filter_mode);
+	len += snprintf(buf+len, buf_len-len, "    Vlan-Offload-Mode: %u \n", sw_port_peer_fwd_rules[portid].vlan_offload_mode);
+	len += snprintf(buf+len, buf_len-len, "    Mpls-Offload-Mode: %u \n", sw_port_peer_fwd_rules[portid].mpls_offload_mode);
+	len += snprintf(buf+len, buf_len-len, "\nSet Ok ! \n");	
 		
 	return len;
 }
 
+static int _sw_dpdk_get_port_simpe_stat(uint16_t portid, char* buf, int buf_len) {
+	int len = 0;
+	uint16_t i = 0;
+	if ((sw_enabled_port_mask & (1 << portid)) == 0)
+	{
+		len += snprintf(buf+len, buf_len-len, "PortID:%u is not enabled, PortMask:%d!\n", portid, sw_enabled_port_mask);
+		return len;
+	}	
 
+	if (sw_port_mode_map[portid] == SW_PORT_RX)
+	{
+		len += snprintf(buf+len, buf_len-len, "Port %u RX mode, Peer Port %u :\n", portid, sw_port_peer[portid].tx_port);
+	}
+	else if (sw_port_mode_map[portid] == SW_PORT_TX)
+	{
+		len += snprintf(buf+len, buf_len-len, "Port %u TX mode, Peer Port %u :\n", portid, sw_port_peer[portid].rx_port);
+	}
+	len += snprintf(buf+len, buf_len-len, "MAC address: %02X:%02X:%02X:%02X:%02X:%02X\n",
+				sw_ports_eth_addr[portid].addr_bytes[0],
+				sw_ports_eth_addr[portid].addr_bytes[1],
+				sw_ports_eth_addr[portid].addr_bytes[2],
+				sw_ports_eth_addr[portid].addr_bytes[3],
+				sw_ports_eth_addr[portid].addr_bytes[4],
+				sw_ports_eth_addr[portid].addr_bytes[5]);
+	struct rte_eth_stats stats;
+	rte_eth_stats_get(portid, &stats);
+	if (sw_port_mode_map[portid] == SW_PORT_RX) {
+		len += snprintf(buf+len, buf_len-len, "  RX-packets: %-18"PRIu64" RX-bytes:  %-18"PRIu64"\n", stats.ipackets,stats.ibytes);
+    	len += snprintf(buf+len, buf_len-len, "  RX-pps:	  %-18"PRIu64"\n",port_hw_stat[portid].rx_pps);
+		len += snprintf(buf+len, buf_len-len, "  RX-bps:	  %-18"PRIu64"\n",port_hw_stat[portid].rx_bps);
+		len += snprintf(buf+len, buf_len-len, "  RX-pps-total:	  %-18"PRIu64"\n", port_hw_stat[portid].rx_pps_total);
+	} else {
+		len += snprintf(buf+len, buf_len-len, "  TX-packets: %-18"PRIu64" TX-errors: %-18"PRIu64" TX-bytes:  "
+		   "%-"PRIu64"\n",
+		   stats.opackets, stats.oerrors, stats.obytes);
+		len += snprintf(buf+len, buf_len-len, "  TX-pps:	  %-18"PRIu64"\n", port_hw_stat[portid].tx_pps);
+		len += snprintf(buf+len, buf_len-len, "  TX-bps:	  %-18"PRIu64"\n", port_hw_stat[portid].tx_bps);
+		len += snprintf(buf+len, buf_len-len, "  TX-pps-total:	  %-18"PRIu64"\n", port_hw_stat[portid].tx_pps_total);
+	}
+	return len;
+}
+static int sw_dpdk_all_port_stat(char* buf, int buf_len) {
+	int len = 0;
+	uint16_t i = 0;
+	int portid = 0;
+	for (portid = 0; portid < SW_DPDK_MAX_PORT; ++portid) {
+		if ((sw_enabled_port_mask & (1 << portid)) == 0)
+		{
+			continue;
+		}
+		if (sw_port_mode_map[portid] == SW_PORT_RX)
+		{
+			len += _sw_dpdk_get_port_simpe_stat(portid, buf + len, buf_len - len);
+			len += _sw_dpdk_get_port_simpe_stat(sw_port_peer[portid].tx_port, buf + len, buf_len - len);
+			len += snprintf(buf+len, buf_len-len, "================================================\n");
+		}
+	}
+	return len;
+}
 static int sw_dpdk_port_stat(uint16_t portid, char* buf, int buf_len)
 {
 	int len = 0;
@@ -1157,19 +1484,24 @@ static int sw_dpdk_port_stat(uint16_t portid, char* buf, int buf_len)
 		tx_num = sw_port_peer[portid].tx_core_num;
 		for (i = 0; i < tx_num; i++)
 		{
-			len += snprintf(buf+len, buf_len-len, "  [Ring%02u]Deque-Cache-Ring:  %-18"PRIu64 "In-Delay-Ring:  %-18"PRIu64 "Out-Delay-Ring:  %-18"PRIu64 "\n          Drop-Parse:  %-18"PRIu64 "\n          Filter-Len:  %-18"PRIu64 "\n          Filter-Syn:  %-18"PRIu64 "\n          Filter-Acl:  %-18"PRIu64 "\n          Filter-Offset:  %-18"PRIu64"\n", 
+			len += snprintf(buf+len, buf_len-len, "  [Ring%02u]Deque-Cache-Ring:  %-18"PRIu64 "In-Delay-Ring:  %-18"PRIu64 "Out-Delay-Ring:  %-18"PRIu64 "Interface-Tx:  %-18"PRIu64 "\n          Err-Parse:  %-18"PRIu64"     Err-Eth:  %-18"PRIu64"     Err-NetParse:  %-18"PRIu64"     Err-TransParse:  %-18"PRIu64 "\n          Filter-Len:  %-18"PRIu64 "\n          Filter-Max-Len:  %-18"PRIu64 "\n          Filter-Syn:  %-18"PRIu64 
+                                                    "\n          Filter-Acl:  %-18"PRIu64 "\n          Filter-Offset:  %-18"PRIu64"\n          Filter-Ipv6:  %-18"PRIu64"\n          Filter-VlanOff:  %-18"PRIu64"\n          Filter-MplsOv4:  %-18"PRIu64"\n          Filter-MplsOv6:  %-18"PRIu64"\n", 
 							i, port_sw_stat[portid].deque_cache_ring[i], port_sw_stat[portid].enque_tx_ring[i],
-							port_sw_stat[portid].deque_tx_ring[i],
-							port_sw_stat[portid].drop_by_parsed[i], port_sw_stat[portid].filter_len[i], port_sw_stat[portid].filter_syn[i], 
-							port_sw_stat[portid].filter_acl[i],port_sw_stat[portid].filter_offset[i]);
+							port_sw_stat[portid].deque_tx_ring[i], port_sw_stat[portid].deque_tx_interface[i],
+							port_sw_stat[portid].drop_by_parsed[i], port_sw_stat[portid].drop_by_parsed_eth[i], port_sw_stat[portid].drop_by_parsed_net[i], port_sw_stat[portid].drop_by_parsed_trans[i], 
+							port_sw_stat[portid].filter_len[i], port_sw_stat[portid].filter_max_len[i],
+							port_sw_stat[portid].filter_syn[i], 
+							port_sw_stat[portid].filter_acl[i],port_sw_stat[portid].filter_offset[i],
+							port_sw_stat[portid].filter_ipv6[i],port_sw_stat[portid].filter_vlan_off[i],
+							port_sw_stat[portid].filter_mpls_off_v4[i], port_sw_stat[portid].filter_mpls_off_v6[i]);
 		}
 
 		len += snprintf(buf+len, buf_len-len, "\n\nPackets Stat:\n\n");
 		for (i = 0; i < tx_num; i++)
 		{
-			len += snprintf(buf+len, buf_len-len, "  [Ring%02u]VLAN:  %-18"PRIu64 "  MPLS:  %-18"PRIu64 "  IPv4:  %-18"PRIu64 "ICMP:  %-18"PRIu64 "TCP:  %-18"PRIu64 "UDP:  %-18"PRIu64"\n", 
+			len += snprintf(buf+len, buf_len-len, "  [Ring%02u]VLAN:  %-18"PRIu64 "  MPLS:  %-18"PRIu64 "  IPv4:  %-18"PRIu64 "  IPv6:  %-18"PRIu64 "ICMP:  %-18"PRIu64 "TCP:  %-18"PRIu64 "UDP:  %-18"PRIu64"\n", 
 							i, port_sw_stat[portid].vlan_pkts[i], port_sw_stat[portid].mpls_pkts[i],
-							port_sw_stat[portid].ipv4_pkts[i], port_sw_stat[portid].icmp_pkts[i],
+							port_sw_stat[portid].ipv4_pkts[i],port_sw_stat[portid].ipv6_pkts[i], port_sw_stat[portid].icmp_pkts[i],
 							port_sw_stat[portid].tcp_pkts[i], port_sw_stat[portid].udp_pkts[i]);
 
 			len += snprintf(buf+len, buf_len-len, "          Len_Less_128 :  %-18"PRIu64 "\n", port_sw_stat[portid].len_less_128[i]);
@@ -1202,55 +1534,86 @@ sw_dpdk_tx_pkts(uint16_t port_id, uint16_t queue_id,
     }while(pkt_leaved > 0);
 #endif
 
+    int i;
+    //20181115 port_id = SW_DPDK_DROP_PORT means drop pkts
+    if (port_id == SW_DPDK_DROP_PORT)
+    {
+        for (i = 0; i < pkt_num; i++)
+            rte_pktmbuf_free(pkts_burst[i]);
+
+        return;
+    }
+
+
 	struct rte_eth_dev_tx_buffer *buffer = sw_tx_buffer[port_id][queue_id];
-	int i;
 	for (i = 0; i < pkt_num; i++)
 		rte_eth_tx_buffer(port_id, queue_id, buffer, pkts_burst[i]);
 }
 
 //cache ring 进行解析
-static void sw_dpdk_get_parse(struct rte_ring *cache_ring, struct rte_ring *tx_ring, uint16_t rx_port, uint16_t tx_port, uint16_t tx_queid, uint16_t loopback)
+static void sw_dpdk_get_parse(struct rte_ring *cache_ring, struct rte_ring *tx_ring, uint16_t rx_port, uint16_t tx_port, uint16_t tx_queid, uint16_t loopback, unsigned lcore_id)
 {
 	int i;
 	uint16_t pkt_len = 0;
 	struct rte_mbuf *m;
 	struct rte_mbuf *m_bulk[MAX_PKT_BURST];
-	int num = rte_ring_dequeue_bulk(cache_ring, (void **)&m_bulk, MAX_PKT_BURST, NULL);
+	int threadId;
+	int length;
+
+    static int _tmp_flag = 0;
+
+	//int num = rte_ring_dequeue_bulk(cache_ring, (void **)&m_bulk, MAX_PKT_BURST, NULL);
+	int num = rte_ring_dequeue_burst(cache_ring, (void **)&m_bulk, MAX_PKT_BURST, NULL);
 	if (num == 0)
 		return;
 
 	port_sw_stat[tx_port].deque_cache_ring[tx_queid] += num;
 
-	SW_DPDK_Log_Debug("PortID:%u-%u get %d num pkts ....\n", rx_port, tx_port, num);
+	//SW_DPDK_Log_Debug("PortID:%u-%u get %d num pkts ....\n", rx_port, tx_port, num);
 
-	if (loopback)
-	{
-		sw_dpdk_tx_pkts(rx_port, tx_queid, m_bulk, num);
-		SW_DPDK_Log_Debug("Loopback, PortID:%u-%u send %d num pkts ok ....\n", rx_port, tx_port, num);
-	}
-	
+	//if (loopback)
+	//{
+	//	sw_dpdk_tx_pkts(rx_port, tx_queid, m_bulk, num);
+	//	SW_DPDK_Log_Debug("Loopback, PortID:%u-%u send %d num pkts ok ....\n", rx_port, tx_port, num);
+	//}
+
+    pthread_rwlock_rdlock(&sw_config_rwlock[rx_port]);//请求读锁
+    
 	uint16_t len_filter_mode = sw_port_peer_fwd_rules[rx_port].len_filter_mode;
+    uint16_t max_len_filter_mode = sw_port_peer_fwd_rules[rx_port].max_len_filter_mode;
 	uint16_t syn_filter_mode = sw_port_peer_fwd_rules[rx_port].syn_filter_mode;
 	uint16_t acl_filter_mode = sw_port_peer_fwd_rules[rx_port].acl_filter_mode;
 	uint16_t offset_filter_mode = sw_port_peer_fwd_rules[rx_port].offset_filter_mode;
+    uint16_t ipv6_filter_mode = sw_port_peer_fwd_rules[rx_port].ipv6_filter_mode;
+    uint16_t vlan_offload_mode = sw_port_peer_fwd_rules[rx_port].vlan_offload_mode;
+    uint16_t mpls_offload_mode = sw_port_peer_fwd_rules[rx_port].mpls_offload_mode;
 
 	uint16_t len_filter_tx_port = sw_len_filter_tx_port[rx_port];
+    uint16_t max_len_filter_tx_port = sw_max_len_filter_tx_port[rx_port];
 	uint16_t syn_filter_tx_port = sw_syn_filter_tx_port[rx_port];
 	uint16_t acl_filter_tx_port = sw_acl_filter_tx_port[rx_port];
 	uint16_t offset_filter_tx_port = sw_offset_filter_tx_port[rx_port];
+    uint16_t ipv6_filter_tx_port = sw_ip6_filter_tx_port[rx_port];
+
+    uint16_t filter_len = sw_port_peer_fwd_rules[rx_port].len_filter_len;
+    uint16_t max_filter_len = sw_port_peer_fwd_rules[rx_port].max_len_filter_len;
+
+    pthread_rwlock_unlock(&sw_config_rwlock[rx_port]);//请求读锁
 
 	int delay_num = 0;
 	struct rte_mbuf *m_delay[MAX_PKT_BURST];	
 	PKT_INFO_S pkt_info;
 	struct rte_mbuf **m_non_len = m_bulk;
 	int len_left = num;
+    int parse_ok = 0;
 	
+#if 0	
 	//len filter
 	///////////////////////////////////////////////////////////
 	if (!len_filter_mode)
 		goto non_len_filter;
 
-	uint16_t filter_len = sw_port_peer_fwd_rules[rx_port].len_filter_len;
+	//uint16_t filter_len = sw_port_peer_fwd_rules[rx_port].len_filter_len;
 	len_left = 0;
 	int len_filter = 0;
 	struct rte_mbuf *m_len_filter[MAX_PKT_BURST];
@@ -1273,19 +1636,22 @@ static void sw_dpdk_get_parse(struct rte_ring *cache_ring, struct rte_ring *tx_r
 	port_sw_stat[tx_port].filter_len[tx_queid] += len_filter;
 	m_non_len = m_len_left;
 	///////////////////////////////////////////////////////////
-
+#endif
 non_len_filter:
 	//////////////////////////////////////////////////////////	
 	//报文解包过滤  过滤出需要延时的报文
 	for (i = 0; i < len_left; i++)
 	{
 		//对报文进行分析
+		parse_ok = 0;
 		m = m_non_len[i];
 		pkt_info.peth_pkt = rte_pktmbuf_mtod(m, uint8_t *);
 		pkt_info.pkt_len = rte_pktmbuf_pkt_len(m);
 		pkt_len = rte_pktmbuf_pkt_len(m);;
 		if (SW_PARSE_OK == sw_pkt_get_hdr(&pkt_info))
 		{
+		    parse_ok = 1;
+            
 			//统计信息
 			if (pkt_info.vlan_flag)
 				port_sw_stat[tx_port].vlan_pkts[tx_queid]++;
@@ -1295,6 +1661,9 @@ non_len_filter:
 
 			if (pkt_info.ipv4_flag)
 				port_sw_stat[tx_port].ipv4_pkts[tx_queid]++;
+		
+			if (pkt_info.ipv6_flag)
+				port_sw_stat[tx_port].ipv6_pkts[tx_queid]++;
 
 			if (pkt_info.icmp_flag)
 				port_sw_stat[tx_port].icmp_pkts[tx_queid]++;
@@ -1320,56 +1689,155 @@ non_len_filter:
 		else
 		{
 			port_sw_stat[tx_port].drop_by_parsed[tx_queid]++;
-			rte_pktmbuf_free(m);
-			continue;
+            if (pkt_info.err_reason == ERR_ETH)
+                port_sw_stat[tx_port].drop_by_parsed_eth[tx_queid]++;
+            else if (pkt_info.err_reason == ERR_NET)
+                port_sw_stat[tx_port].drop_by_parsed_net[tx_queid]++;
+            else if (pkt_info.err_reason == ERR_TRANS)
+                port_sw_stat[tx_port].drop_by_parsed_trans[tx_queid]++;
+            
+			//rte_pktmbuf_free(m);
+            if (loopback && (rte_mbuf_refcnt_read(m) >= 2))
+    	    {
+    		    sw_dpdk_tx_pkts(rx_port, tx_queid, &m, 1);
+    	    }
+
+            //不识别的报文，直接不延迟发送
+            sw_dpdk_tx_pkts(tx_port, tx_queid, &m, 1);
+
+            continue;
 		}
-		
-		//syn 过滤
-		if (syn_filter_mode)
-		{
-			if (pkt_info.proto == PKT_IPPROTO_TCP && 
-				((pkt_info.trans_info.tcp.flags & 0x0200) ||
-				 (pkt_info.trans_info.tcp.flags & 0x0100) ||
-				 (pkt_info.trans_info.tcp.flags & 0x0400)))
-			{
-				port_sw_stat[tx_port].filter_syn[tx_queid] ++;
-				sw_dpdk_tx_pkts(syn_filter_tx_port, tx_queid, &m, 1);
 
-				SW_DPDK_Log_Debug("Syn PortID:%u-%u send %d num pkts ok to prot:%u ....\n", rx_port, tx_port, 1, syn_filter_tx_port);
-				continue;
-			}
-		}
-		
+        if (parse_ok)
+        {
+            //若vlan 卸载功能打开，则需要卸载vlan
+    		if ((vlan_offload_mode == SW_FILTER_VLANOFF_ENABLE) && pkt_info.vlan_flag)
+            {
+                char _mac[12];
+                memcpy(_mac, rte_pktmbuf_mtod(m, uint8_t *), 12);
+                char *new_eth = rte_pktmbuf_adj(m, pkt_info.vlan_layers * 4);
+                memcpy(new_eth, _mac, 12);
+                port_sw_stat[tx_port].filter_vlan_off[tx_queid]++;
+            }
 
-		//acl 过滤
-		if (acl_filter_mode)
-		{
-			if (0 == sw_filter_port(rx_port, tx_queid, &pkt_info))
-			{
-				port_sw_stat[tx_port].filter_acl[tx_queid]++;
-				sw_dpdk_tx_pkts(acl_filter_tx_port, tx_queid, &m, 1);
+            //若mpls 卸载功能打开，则需要卸载mpls
+    		if ((mpls_offload_mode == SW_FILTER_MPLSOFF_ENABLE) && pkt_info.mpls_flag)
+            {
+                //char _print = 0;
+                //if (0 == _tmp_flag)
+                //{
+                //    _tmp_flag = 1;
+                //    _print = 1;
+                //    printf("=======> Before Mpls: %d \n", m->data_len);
+                //    rte_pktmbuf_dump(stdout, m, m->data_len);
+                //}
+            
+                char _head[14];
+                memcpy(_head, rte_pktmbuf_mtod(m, uint8_t *), 12);
+                char *new_eth = rte_pktmbuf_adj(m, pkt_info.mpls_layers * 4);
+                if (pkt_info.ipv6_flag == 1)
+                {
+                    _head[12] = 0x86;//mpls means it is ip pkt .... ?
+                    _head[13] = 0xdd;
+                    port_sw_stat[tx_port].filter_mpls_off_v6[tx_queid]++;
+                }
+                else if (pkt_info.ipv4_flag == 1)
+                {
+                    _head[12] = 0x08;//mpls means it is ip pkt .... ?
+                    _head[13] = 0x00;
+                    port_sw_stat[tx_port].filter_mpls_off_v4[tx_queid]++;
+                }
+                memcpy(new_eth, _head, 14);
+                
 
-				SW_DPDK_Log_Debug("Acl PortID:%u-%u send %d num pkts ok to prot:%u ....\n", rx_port, tx_port, 1, acl_filter_tx_port);
-				continue;
-			}
-		}
-				
+                //if (1 == _print)
+                //{
+                //    printf("=======> End Mpls: %d \n", m->data_len);
+                //    rte_pktmbuf_dump(stdout, m, m->data_len);
+                //}
+            }
+            
+    		if (loopback && (rte_mbuf_refcnt_read(m) >= 2))
+    	    {
+    		    sw_dpdk_tx_pkts(rx_port, tx_queid, &m, 1);
+    	    }
+            
+    		if (len_filter_mode && (rte_pktmbuf_pkt_len(m) <= filter_len))
+            {
+    	        port_sw_stat[tx_port].filter_len[tx_queid] ++;
+    		    sw_dpdk_tx_pkts(len_filter_tx_port, tx_queid, &m, 1);
+                continue;			
+    		}
 
-		//offset 过滤
-		if (offset_filter_mode)
-		{
-			if (0 > sw_offset_match(rx_port, tx_queid, &pkt_info))
-			{
-				port_sw_stat[tx_port].filter_offset[tx_queid]++;
-				sw_dpdk_tx_pkts(offset_filter_tx_port, tx_queid, &m, 1);
+            if (max_len_filter_mode && (rte_pktmbuf_pkt_len(m) >= max_filter_len))
+            {
+    	        port_sw_stat[tx_port].filter_max_len[tx_queid] ++;
+    		    sw_dpdk_tx_pkts(max_len_filter_tx_port, tx_queid, &m, 1);
+                continue;			
+    		}
 
-				SW_DPDK_Log_Debug("Offset PortID:%u-%u send %d num pkts ok to prot:%u ....\n", rx_port, tx_port, 1, offset_filter_tx_port);
-				continue;
-			}	
-		}
-		
+            //ipv6 filter
+            if (ipv6_filter_mode && pkt_info.ipv6_flag)
+            { 
+                port_sw_stat[tx_port].filter_ipv6[tx_queid] ++;
+                sw_dpdk_tx_pkts(ipv6_filter_tx_port, tx_queid, &m, 1);
+                continue;
+            }
+            
+    		//syn 过滤
+    		if (syn_filter_mode && !pkt_info.ipv6_flag)
+    		{
+    			if (pkt_info.proto == PKT_IPPROTO_TCP && 
+    				((pkt_info.trans_info.tcp.flags & 0x0200) ||
+    				 (pkt_info.trans_info.tcp.flags & 0x0100) ||
+    				 (pkt_info.trans_info.tcp.flags & 0x0400)))
+    			{
+    				port_sw_stat[tx_port].filter_syn[tx_queid] ++;
+                    SW_DPDK_Log_Debug("Syn PortID:%u-%u send %d num pkts ok to port:%u ....\n", rx_port, tx_port, 1, syn_filter_tx_port);
+                    //SW_DPDK_Log_Info("Syn PortID:%u-%u send %d num pkts ok to port:%u ....\n", rx_port, tx_port, 1, syn_filter_tx_port);
+    				sw_dpdk_tx_pkts(syn_filter_tx_port, tx_queid, &m, 1);				
+    				continue;
+    			}
+    		}
+    		
 
-		//剩下的为需要delay的
+    		//acl 过滤
+    		if (acl_filter_mode && !pkt_info.ipv6_flag)
+    		{
+    			if (0 == sw_filter_port(rx_port, tx_queid, &pkt_info))
+    			{
+    				port_sw_stat[tx_port].filter_acl[tx_queid]++;
+    				sw_dpdk_tx_pkts(acl_filter_tx_port, tx_queid, &m, 1);
+
+    				SW_DPDK_Log_Debug("Acl PortID:%u-%u send %d num pkts ok to prot:%u ....\n", rx_port, tx_port, 1, acl_filter_tx_port);
+    				continue;
+    			}
+    		}
+    				
+
+    		//offset 过滤
+    		if (offset_filter_mode && !pkt_info.ipv6_flag)
+    		{
+    			if (0 > sw_offset_match(rx_port, tx_queid, &pkt_info))
+    			{
+    				port_sw_stat[tx_port].filter_offset[tx_queid]++;
+    				sw_dpdk_tx_pkts(offset_filter_tx_port, tx_queid, &m, 1);
+
+    				SW_DPDK_Log_Debug("Offset PortID:%u-%u send %d num pkts ok to prot:%u ....\n", rx_port, tx_port, 1, offset_filter_tx_port);
+    				continue;
+    			}	
+    		}
+        }
+        //else
+        //{
+            //解析成功，则回环的报文会去掉vlan.mpls头部，否则原生报文
+        //    if (loopback && (rte_mbuf_refcnt_read(m) >= 2))
+    	//    {
+    	//	    sw_dpdk_tx_pkts(rx_port, tx_queid, &m, 1);
+    	//    }
+        //}
+
+		//剩下的为需要delay的      
 		m_delay[delay_num++] = m;
 	}
 
@@ -1428,6 +1896,8 @@ sw_dpdk_main_loop(void *arg)
 	uint8_t  get_new_pkt = 1;
 	const uint64_t drain_tsc = (rte_get_tsc_hz() + US_PER_S - 1) / US_PER_S * SW_BURST_TX_DRAIN_US;
 	uint64_t sw_used_core_mask;
+	int threadId;
+	int length = 0;
 		
 	//lcore_id = rte_lcore_id();
 	lcore_id = *((unsigned *)arg);
@@ -1439,6 +1909,8 @@ sw_dpdk_main_loop(void *arg)
 	if ((sw_used_core_mask & ((uint64_t)1 << (lcore_id % 64))) == 0 || 0 == lcore_id)
 	{
 		RTE_LOG(INFO, VSWITCH, "lcore %u has nothing to do \n", lcore_id);
+		fprintf(runlogF, "lcore %u has nothing to do ", lcore_id);
+		fclose(runlogF);
 		return NULL;
 	}
 
@@ -1472,6 +1944,8 @@ sw_dpdk_main_loop(void *arg)
 	else
 	{
 		SW_DPDK_Log_Error("Core %u Mode error %d ...\n", lcore_id, core_mode);
+		fprintf(runlogF, "Core %u Mode error %d ...", lcore_id, core_mode);
+		fclose(runlogF);
 		return NULL;
 	}
 	
@@ -1493,32 +1967,62 @@ sw_dpdk_main_loop(void *arg)
 			if (rx_mode && sw_port_need_update_rx[rx_port])
 			{
 				sw_port_need_update_rx[rx_port] = 0;
-			
+            
 				delay = sw_port_peer[rx_port].delay_s;
 				loopback = sw_port_peer[rx_port].loopback;
 
-				SW_DPDK_Log_Info("Core %u Start to update conf delay:%u, loopback:%u ... \n", lcore_id, delay, loopback);
+				SW_DPDK_Log_Info("RX Core %u Start to update conf delay:%u, loopback:%u ... \n", lcore_id, delay, loopback);
 
+            #if 0
 				//放在rx核心上操作，避免tx多核心的同时处理	
 				if (sw_port_peer_fwd_rules[rx_port].len_filter_mode == SW_FILTER_LEN_RXPORT)
 					sw_len_filter_tx_port[rx_port] = rx_port;
 				else if (sw_port_peer_fwd_rules[rx_port].len_filter_mode == SW_FILTER_LEN_TXPORT)
 					sw_len_filter_tx_port[rx_port] = tx_port;
+                else if (sw_port_peer_fwd_rules[rx_port].len_filter_mode == SW_FILTER_LEN_DROP)
+					sw_len_filter_tx_port[rx_port] = SW_DPDK_DROP_PORT;
+
+                if (sw_port_peer_fwd_rules[rx_port].max_len_filter_mode == SW_FILTER_MAX_LEN_RXPORT)
+					sw_max_len_filter_tx_port[rx_port] = rx_port;
+				else if (sw_port_peer_fwd_rules[rx_port].max_len_filter_mode == SW_FILTER_MAX_LEN_TXPORT)
+					sw_max_len_filter_tx_port[rx_port] = tx_port;
+                else if (sw_port_peer_fwd_rules[rx_port].max_len_filter_mode == SW_FILTER_MAX_LEN_DROP)
+					sw_max_len_filter_tx_port[rx_port] = SW_DPDK_DROP_PORT;
 				
 				if (sw_port_peer_fwd_rules[rx_port].syn_filter_mode == SW_FILTER_SYN_RXPORT)
 					sw_syn_filter_tx_port[rx_port] = rx_port;
 				else if (sw_port_peer_fwd_rules[rx_port].syn_filter_mode == SW_FILTER_SYN_TXPORT)
 					sw_syn_filter_tx_port[rx_port] = tx_port;
+                else if (sw_port_peer_fwd_rules[rx_port].syn_filter_mode == SW_FILTER_SYN_DROP)
+					sw_syn_filter_tx_port[rx_port] = SW_DPDK_DROP_PORT;
 
 				if (sw_port_peer_fwd_rules[rx_port].acl_filter_mode == SW_FILTER_ACL_RXPORT)
 					sw_acl_filter_tx_port[rx_port] = rx_port;
 				else if (sw_port_peer_fwd_rules[rx_port].acl_filter_mode == SW_FILTER_ACL_TXPORT)
 					sw_acl_filter_tx_port[rx_port] = tx_port;
+                else if (sw_port_peer_fwd_rules[rx_port].acl_filter_mode == SW_FILTER_ACL_DROP)
+					sw_acl_filter_tx_port[rx_port] = SW_DPDK_DROP_PORT;
 
 				if (sw_port_peer_fwd_rules[rx_port].offset_filter_mode == SW_FILTER_OFF_RXPORT)
 					sw_offset_filter_tx_port[rx_port] = rx_port;
 				else if (sw_port_peer_fwd_rules[rx_port].offset_filter_mode == SW_FILTER_OFF_TXPORT)
 					sw_offset_filter_tx_port[rx_port] = tx_port;
+                else if (sw_port_peer_fwd_rules[rx_port].offset_filter_mode == SW_FILTER_OFF_DROP)
+					sw_offset_filter_tx_port[rx_port] = SW_DPDK_DROP_PORT;
+
+                if (sw_port_peer_fwd_rules[rx_port].ipv6_filter_mode == SW_FILTER_IP6_RXPORT)
+					sw_ip6_filter_tx_port[rx_port] = rx_port;
+				else if (sw_port_peer_fwd_rules[rx_port].ipv6_filter_mode == SW_FILTER_IP6_TXPORT)
+					sw_ip6_filter_tx_port[rx_port] = tx_port;
+                else if (sw_port_peer_fwd_rules[rx_port].ipv6_filter_mode == SW_FILTER_IP6_DROP)
+					sw_ip6_filter_tx_port[rx_port] = SW_DPDK_DROP_PORT;
+
+                pthread_rwlock_unlock(&sw_config_rwlock[rx_port]);//释放写锁
+
+                SW_DPDK_Log_Info("Core %u Start to update conf rxport:%d len:%d max-len:%d syn:%d acl:%d off:%d ipv6:%d ... \n", lcore_id, rx_port,
+                    sw_len_filter_tx_port[rx_port], sw_max_len_filter_tx_port[rx_port], sw_syn_filter_tx_port[rx_port],
+                    sw_acl_filter_tx_port[rx_port], sw_offset_filter_tx_port[rx_port], sw_ip6_filter_tx_port[rx_port]);
+            #endif
 			}
 
 			if (tx_mode && sw_port_need_update_tx[tx_port][tx_queid])
@@ -1548,13 +2052,13 @@ sw_dpdk_main_loop(void *arg)
 			timeout_tsc = cur_tsc + timer_1s_hz * delay;
 			for (i = 0; i < nb_rx; i++)
 			{
-				m = pkts_burst[i];				
+				m = pkts_burst[i];
+ 				rte_prefetch0(rte_pktmbuf_mtod(m, void *));				
 				m->timestamp = timeout_tsc;
 				if (loopback)
 				{
-					//设置ref cnt自增1
-					//rte_mbuf_refcnt_update(m, 1);
-					rte_pktmbuf_refcnt_update(m, 1);
+					//设置ref cnt自增1                    
+					rte_pktmbuf_refcnt_update(m, 1);      
 				}
 				
 				//printf("Time:%18"PRIu64"Recv A pkt,timeout:%18"PRIu64"\n", cur_tsc, m->timestamp);
@@ -1570,8 +2074,12 @@ sw_dpdk_main_loop(void *arg)
 				//port_sw_stat[rx_port].enque_ring[hash_id]++;
 			}		
 
+            // before
 			//暂时hash方式采用轮询的方式 ,后续rx port也可以根据rss来分流
-			hash_id = (hash_cnt++) % tx_num;
+			//hash_id = (hash_cnt++) % tx_num;
+
+            //from 20181116, use the most idle que
+            hash_id = sw_idle_que_id[rx_port];
 			if (nb_rx != (nb_send = rte_ring_enqueue_bulk(rx_push_ring[hash_id], (void**)pkts_burst, nb_rx, NULL)))
 			{
 				for (i = nb_send; i < nb_rx; i++)
@@ -1582,7 +2090,7 @@ sw_dpdk_main_loop(void *arg)
 			else
 			{
 				port_sw_stat[rx_port].enque_ring[hash_id] += nb_rx;
-				SW_DPDK_Log_Debug("recevice %u pkts from rx_port:%u and Push to Ring ...\n", nb_rx, rx_port);
+				//SW_DPDK_Log_Debug("recevice %u pkts from rx_port:%u and Push to Ring ...\n", nb_rx, rx_port);
 			}
 			//只有在回还的情况下rx port才会发包
 			//if (loopback)
@@ -1598,9 +2106,23 @@ sw_dpdk_main_loop(void *arg)
 		}
 		
 		if (tx_mode)
-		{		
+		{
+            // flush the tx buffer
+			if (unlikely(diff_tsc > drain_tsc)) {
+
+				//rx
+				rte_eth_tx_buffer_flush(rx_port, tx_queid, sw_tx_buffer[rx_port][tx_queid]);
+				//if (!loopback) 
+				//	rte_eth_tx_buffer_flush(rx_port, tx_queid, sw_tx_buffer[rx_port][tx_queid]);
+
+				//tx
+				rte_eth_tx_buffer_flush(tx_port, tx_queid, sw_tx_buffer[tx_port][tx_queid]);
+				
+				prev_tsc = cur_tsc;
+			}
+        
 			//cache ring 进行解析
-			sw_dpdk_get_parse(cache_ring, tx_ring, rx_port, tx_port, tx_queid, loopback);
+			sw_dpdk_get_parse(cache_ring, tx_ring, rx_port, tx_port, tx_queid, loopback, lcore_id);
 
 			//发送真实数据
 			if (get_new_pkt)
@@ -1608,6 +2130,7 @@ sw_dpdk_main_loop(void *arg)
 				ret = rte_ring_dequeue(tx_ring, (void **)&send_m);
 				if (ret != 0)
 				{
+				    //usleep(1);
 					continue;
 				}
 				else
@@ -1622,25 +2145,12 @@ sw_dpdk_main_loop(void *arg)
 			if (cur_tsc >= send_m->timestamp)
 			{
 				//printf("Time:%18"PRIu64"Forward A pkt,timeout:%18"PRIu64"\n", cur_tsc,m->timestamp);
+				port_sw_stat[tx_port].deque_tx_interface[tx_queid]++;
 				sw_dpdk_tx_pkts(tx_port, tx_queid, &send_m, 1);
 				get_new_pkt = 1;
 			}
 			else
-				get_new_pkt = 0;
-
-			// flush the tx buffer
-			if (unlikely(diff_tsc > drain_tsc)) {
-
-				//rx
-				rte_eth_tx_buffer_flush(rx_port, tx_queid, sw_tx_buffer[rx_port][tx_queid]);
-				//if (!loopback) 
-				//	rte_eth_tx_buffer_flush(rx_port, tx_queid, sw_tx_buffer[rx_port][tx_queid]);
-
-				//tx
-				rte_eth_tx_buffer_flush(tx_port, tx_queid, sw_tx_buffer[tx_port][tx_queid]);
-				
-				prev_tsc = cur_tsc;
-			}
+				get_new_pkt = 0;			
 		}
 	}
 
@@ -1742,14 +2252,20 @@ int sw_dpdk_start(void)
 	RTE_LCORE_FOREACH_SLAVE(lcore_id)
 	{
 		core_array[i] = lcore_id;
+		sw_core_conf[lcore_id].threadId = i;
 		ret = pthread_create(&threadId, NULL, sw_dpdk_main_loop, &core_array[i]);
 		if (0 != ret)
 		{
 			SW_DPDK_Log_Error("Lcoreid:%u create thread error!\n", lcore_id);
+			fprintf(runlogF, "Lcoreid:%u create thread error!", lcore_id);
+			fclose(runlogF);
 			return -1;
 		}
 		i++;
 	}
+	sleep(3);
+	fprintf(runlogF, "vswitch start success...", lcore_id);
+	fclose(runlogF);
 
 	while (1)
 	{
@@ -1844,6 +2360,7 @@ int sw_dpdk_init(char* conf_path, uint32_t dpdk_pps)
 	sw_command_register_show_core_mode(sw_dpdk_core_map);
 	sw_command_register_kill_self(sw_dpdk_kill_self);
 	sw_command_register_show_port(sw_dpdk_port_stat);
+	sw_command_register_show_portpeer_stats(sw_dpdk_all_port_stat);
 	sw_command_register_show_fwd_rule(sw_dpdk_show_fwd);
 	sw_command_register_set_fwd_rule(sw_dpdk_set_fwd);
 	sw_command_init(CMD_ROLE_SERVER);
@@ -1943,9 +2460,29 @@ int sw_dpdk_init(char* conf_path, uint32_t dpdk_pps)
 		return -1;
 	}
 
+    if (0 != pthread_create(&threadid, NULL, sw_dpdk_calc_idle_que_thread, NULL))
+    {
+        printf("create sw_dpdk_calc_idle_que_thread error!\n");
+		return -1;
+    }
+    
 	return 0;
 }
 
+uint32_t sw_dpdk_http_show_all_port(SW_DPDK_HTTP_ALL_PORT_INFO* port_info, char* buf, int buf_len) {
+	int portid = 0;
+	int numofinfos = 0;
+	for (portid = 0; portid < SW_DPDK_MAX_PORT; ++portid) {
+		if ((sw_enabled_port_mask & (1 << portid)) == 0) {
+			continue;
+		}
+		port_info->infos[numofinfos].portid = portid;
+		port_info->infos[numofinfos].mode = sw_port_mode_map[portid];
+		++numofinfos;
+	}
+	port_info->numofinfos = numofinfos;
+	return 0;
+}
 
 ///////////////////////////////////////////////////////////////////
 uint32_t sw_dpdk_http_show_port(uint32_t portid, SW_DPDK_HTTP_PORT_INFO* port_info, char* buf, int buf_len)
@@ -1993,13 +2530,16 @@ uint32_t sw_dpdk_http_show_port(uint32_t portid, SW_DPDK_HTTP_PORT_INFO* port_in
 	for (i = 0; i < sw_port_peer[tx_port].tx_core_num; i++)
 	{
 		port_info->filter_len += port_sw_stat[tx_port].filter_len[i];
+        port_info->filter_max_len += port_sw_stat[tx_port].filter_max_len[i];
 		port_info->filter_syn += port_sw_stat[tx_port].filter_syn[i];
 		port_info->filter_acl += port_sw_stat[tx_port].filter_acl[i];
 		port_info->filter_offset += port_sw_stat[tx_port].filter_offset[i];
+        port_info->filter_ipv6 += port_sw_stat[tx_port].filter_ipv6[i];
 
 		port_info->vlan_pkts += port_sw_stat[tx_port].vlan_pkts[i];
 		port_info->mpls_pkts += port_sw_stat[tx_port].mpls_pkts[i];
 		port_info->ipv4_pkts += port_sw_stat[tx_port].ipv4_pkts[i];
+		port_info->ipv6_pkts += port_sw_stat[tx_port].ipv6_pkts[i];
 		port_info->icmp_pkts += port_sw_stat[tx_port].icmp_pkts[i];
 		port_info->tcp_pkts += port_sw_stat[tx_port].tcp_pkts[i];
 		port_info->udp_pkts += port_sw_stat[tx_port].udp_pkts[i];
@@ -2036,9 +2576,14 @@ uint32_t sw_dpdk_http_show_fwd(uint32_t portid, SW_DPDK_HTTP_FWD_INFO* fwd_info,
 	fwd_info->loopback = sw_port_peer[portid].loopback;
 	fwd_info->filter_len = sw_port_peer_fwd_rules[portid].len_filter_len;
 	fwd_info->len_mode = sw_port_peer_fwd_rules[portid].len_filter_mode;
+    fwd_info->filter_max_len = sw_port_peer_fwd_rules[portid].max_len_filter_len;
+	fwd_info->max_len_mode = sw_port_peer_fwd_rules[portid].max_len_filter_mode;
 	fwd_info->syn_mode = sw_port_peer_fwd_rules[portid].syn_filter_mode;
 	fwd_info->acl_mode = sw_port_peer_fwd_rules[portid].acl_filter_mode;
 	fwd_info->off_mode = sw_port_peer_fwd_rules[portid].offset_filter_mode;
+	fwd_info->ipv6_mode = sw_port_peer_fwd_rules[portid].ipv6_filter_mode;
+	fwd_info->vlan_mode = sw_port_peer_fwd_rules[portid].vlan_offload_mode;
+	fwd_info->mpls_mode = sw_port_peer_fwd_rules[portid].mpls_offload_mode;
 
 	return len;
 }
@@ -2062,9 +2607,14 @@ uint32_t sw_dpdk_http_set_fwd(uint32_t portid, SW_DPDK_HTTP_FWD_INFO* fwd_info, 
 	uint16_t loopback = fwd_info->loopback;
 	uint16_t filter_len = fwd_info->filter_len;
 	uint16_t len_mode = fwd_info->len_mode;
+    uint16_t filter_max_len = fwd_info->filter_max_len;
+	uint16_t max_len_mode = fwd_info->max_len_mode;
 	uint16_t syn_mode = fwd_info->syn_mode;
 	uint16_t acl_mode = fwd_info->acl_mode;
 	uint16_t off_mode = fwd_info->off_mode;
+	uint16_t ipv6_mode = fwd_info->ipv6_mode;
+	uint16_t vlan_mode = fwd_info->vlan_mode;
+	uint16_t mpls_mode = fwd_info->mpls_mode;
 
 	if (delay_s > sw_port_delay_init[portid])
 	{
@@ -2086,6 +2636,12 @@ uint32_t sw_dpdk_http_set_fwd(uint32_t portid, SW_DPDK_HTTP_FWD_INFO* fwd_info, 
 			return len;
 		}
 
+        if (max_len_mode == SW_FILTER_MAX_LEN_RXPORT)
+		{
+			len += snprintf(buf+len, buf_len-len, "loopback, max-len-mode should not be 1 ...  ");
+			return len;
+		}
+
 		if (syn_mode == SW_FILTER_SYN_RXPORT)
 		{
 			len += snprintf(buf+len, buf_len-len, "loopback, syn-mode should not be 1 ...  ");
@@ -2097,39 +2653,64 @@ uint32_t sw_dpdk_http_set_fwd(uint32_t portid, SW_DPDK_HTTP_FWD_INFO* fwd_info, 
 			len += snprintf(buf+len, buf_len-len, "loopback, offset-mode should not be 1 ...  ");
 			return len;
 		}
+
+        if (ipv6_mode == SW_FILTER_IP6_RXPORT)
+		{
+			len += snprintf(buf+len, buf_len-len, "loopback, ipv6-mode should not be 1 ...  ");
+			return len;
+		}
 	}
 
-	if (filter_len <= SW_DPDK_PKT_LEN_MIN || SW_DPDK_PKT_LEN_MIN >= filter_len)
+	if (filter_len < SW_DPDK_PKT_LEN_MIN || SW_DPDK_PKT_LEN_MAX < filter_len)
 	{
-		len += snprintf(buf+len, buf_len-len, "len : %u  error !", filter_len);
+		len += snprintf(buf+len, buf_len-len, "len : %u  error, must in [%d-%d] !", filter_len, SW_DPDK_PKT_LEN_MIN, SW_DPDK_PKT_LEN_MAX);
 		return len;
 	}
 
-	if ( SW_FILTER_LEN_TXPORT < len_mode)
+	if ( SW_FILTER_LEN_DROP < len_mode)
 	{
 		len += snprintf(buf+len, buf_len-len, "len-mode : %u  error !", len_mode);
 		return len;
 	}
 
-	if (SW_FILTER_SYN_TXPORT < syn_mode)
+    if (filter_max_len < SW_DPDK_PKT_LEN_MIN || SW_DPDK_PKT_LEN_MAX < filter_max_len)
+	{
+		len += snprintf(buf+len, buf_len-len, "max-len : %u  error, must in [%d-%d] !", filter_max_len, SW_DPDK_PKT_LEN_MIN, SW_DPDK_PKT_LEN_MAX);
+		return len;
+	}
+
+	if ( SW_FILTER_MAX_LEN_DROP < max_len_mode)
+	{
+		len += snprintf(buf+len, buf_len-len, "max-len-mode : %u  error !", max_len_mode);
+		return len;
+	}
+
+	if (SW_FILTER_SYN_DROP < syn_mode)
 	{
 		len += snprintf(buf+len, buf_len-len, "syn-mode : %u  error !", syn_mode);
 		return len;
 	}
 
-	if (SW_FILTER_ACL_TXPORT < acl_mode)
+	if (SW_FILTER_ACL_DROP < acl_mode)
 	{
 		len += snprintf(buf+len, buf_len-len, "acl-mode : %u  error !", acl_mode);
 		return len;
 	}
 	
-	if (SW_FILTER_OFF_TXPORT < off_mode)
+	if (SW_FILTER_OFF_DROP < off_mode)
 	{
 		len += snprintf(buf+len, buf_len-len, "off-mode : %u  error !", off_mode);
 		return len;
 	}
+	if (SW_FILTER_IP6_DROP < ipv6_mode)
+	{
+		len += snprintf(buf+len, buf_len-len, "ipv6-mode : %u  error !", ipv6_mode);
+		return len;
+	}
 
 	//update , maybe need to lock
+	pthread_rwlock_wrlock(&sw_config_rwlock[portid]);//请求写锁
+	
 	uint32_t tx_port = sw_port_peer[portid].tx_port;
 	sw_port_peer[portid].loopback = loopback;
 	sw_port_peer[portid].delay_s = delay_s;
@@ -2138,14 +2719,69 @@ uint32_t sw_dpdk_http_set_fwd(uint32_t portid, SW_DPDK_HTTP_FWD_INFO* fwd_info, 
 	
 	sw_port_peer_fwd_rules[portid].len_filter_len = filter_len;
 	sw_port_peer_fwd_rules[portid].len_filter_mode = len_mode;
+    sw_port_peer_fwd_rules[portid].max_len_filter_len = filter_max_len;
+	sw_port_peer_fwd_rules[portid].max_len_filter_mode = max_len_mode;
 	sw_port_peer_fwd_rules[portid].syn_filter_mode = syn_mode;
 	sw_port_peer_fwd_rules[portid].acl_filter_mode = acl_mode;
 	sw_port_peer_fwd_rules[portid].offset_filter_mode = off_mode;
+	sw_port_peer_fwd_rules[portid].ipv6_filter_mode = ipv6_mode;
+	sw_port_peer_fwd_rules[portid].vlan_offload_mode = vlan_mode;
+	sw_port_peer_fwd_rules[portid].mpls_offload_mode = mpls_mode;
 
 	uint32_t i = 0;
 	sw_port_need_update_rx[portid] = 1;
 	for (; i < sw_port_peer[portid].tx_core_num; i++)
 		sw_port_need_update_tx[tx_port][i] = 1;
+
+    //更新加速配置
+    unsigned short rx_port = portid;
+    if (sw_port_peer_fwd_rules[rx_port].len_filter_mode == SW_FILTER_LEN_RXPORT)
+		sw_len_filter_tx_port[rx_port] = rx_port;
+	else if (sw_port_peer_fwd_rules[rx_port].len_filter_mode == SW_FILTER_LEN_TXPORT)
+		sw_len_filter_tx_port[rx_port] = tx_port;
+    else if (sw_port_peer_fwd_rules[rx_port].len_filter_mode == SW_FILTER_LEN_DROP)
+		sw_len_filter_tx_port[rx_port] = SW_DPDK_DROP_PORT;
+
+    if (sw_port_peer_fwd_rules[rx_port].max_len_filter_mode == SW_FILTER_MAX_LEN_RXPORT)
+		sw_max_len_filter_tx_port[rx_port] = rx_port;
+	else if (sw_port_peer_fwd_rules[rx_port].max_len_filter_mode == SW_FILTER_MAX_LEN_TXPORT)
+		sw_max_len_filter_tx_port[rx_port] = tx_port;
+    else if (sw_port_peer_fwd_rules[rx_port].max_len_filter_mode == SW_FILTER_MAX_LEN_DROP)
+		sw_max_len_filter_tx_port[rx_port] = SW_DPDK_DROP_PORT;
+	
+	if (sw_port_peer_fwd_rules[rx_port].syn_filter_mode == SW_FILTER_SYN_RXPORT)
+		sw_syn_filter_tx_port[rx_port] = rx_port;
+	else if (sw_port_peer_fwd_rules[rx_port].syn_filter_mode == SW_FILTER_SYN_TXPORT)
+		sw_syn_filter_tx_port[rx_port] = tx_port;
+    else if (sw_port_peer_fwd_rules[rx_port].syn_filter_mode == SW_FILTER_SYN_DROP)
+		sw_syn_filter_tx_port[rx_port] = SW_DPDK_DROP_PORT;
+
+	if (sw_port_peer_fwd_rules[rx_port].acl_filter_mode == SW_FILTER_ACL_RXPORT)
+		sw_acl_filter_tx_port[rx_port] = rx_port;
+	else if (sw_port_peer_fwd_rules[rx_port].acl_filter_mode == SW_FILTER_ACL_TXPORT)
+		sw_acl_filter_tx_port[rx_port] = tx_port;
+    else if (sw_port_peer_fwd_rules[rx_port].acl_filter_mode == SW_FILTER_ACL_DROP)
+		sw_acl_filter_tx_port[rx_port] = SW_DPDK_DROP_PORT;
+
+	if (sw_port_peer_fwd_rules[rx_port].offset_filter_mode == SW_FILTER_OFF_RXPORT)
+		sw_offset_filter_tx_port[rx_port] = rx_port;
+	else if (sw_port_peer_fwd_rules[rx_port].offset_filter_mode == SW_FILTER_OFF_TXPORT)
+		sw_offset_filter_tx_port[rx_port] = tx_port;
+    else if (sw_port_peer_fwd_rules[rx_port].offset_filter_mode == SW_FILTER_OFF_DROP)
+		sw_offset_filter_tx_port[rx_port] = SW_DPDK_DROP_PORT;
+
+    if (sw_port_peer_fwd_rules[rx_port].ipv6_filter_mode == SW_FILTER_IP6_RXPORT)
+		sw_ip6_filter_tx_port[rx_port] = rx_port;
+	else if (sw_port_peer_fwd_rules[rx_port].ipv6_filter_mode == SW_FILTER_IP6_TXPORT)
+		sw_ip6_filter_tx_port[rx_port] = tx_port;
+    else if (sw_port_peer_fwd_rules[rx_port].ipv6_filter_mode == SW_FILTER_IP6_DROP)
+		sw_ip6_filter_tx_port[rx_port] = SW_DPDK_DROP_PORT;
+
+    pthread_rwlock_wrlock(&sw_config_rwlock[portid]);//释放写锁
+
+    SW_DPDK_Log_Info("HTTP Start to update conf rxport:%d len-port:%d max-len-port:%d syn-port:%d acl-port:%d off-port:%d ipv6-port:%d ... \n", rx_port,
+                    sw_len_filter_tx_port[rx_port], sw_max_len_filter_tx_port[rx_port], sw_syn_filter_tx_port[rx_port],
+                    sw_acl_filter_tx_port[rx_port], sw_offset_filter_tx_port[rx_port], sw_ip6_filter_tx_port[rx_port]);
 		
 	return len;
 }

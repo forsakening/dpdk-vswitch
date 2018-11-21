@@ -12,6 +12,14 @@
 
 #pragma pack(1)
 
+typedef enum
+{
+    ERR_OK    = 0,
+    ERR_ETH   = 1,
+    ERR_NET   = 2,
+    ERR_TRANS = 3,
+}PKT_ERR_REASON;
+
 ///* IPv4 header */
 typedef struct 
 {
@@ -98,12 +106,16 @@ typedef struct
     uint16_t app_len;      //应用层数据长度
     uint16_t mpls_len;      //应用层数据长度
     uint16_t eth_pack_num;   //2.5层封装层数
+    uint16_t vlan_layers;    //vlan layers num
+    uint16_t mpls_layers;    //mpls layers num
     uint8_t  vlan_flag;
 	uint8_t  ipfrag_flag;  //ip分片标记，1分片
 	uint8_t  mpls_flag;  
 	uint8_t  ipv4_flag;
+	uint8_t  ipv6_flag;
 	uint8_t  icmp_flag;
 	uint16_t app_proto; //应用层协议类型
+	uint16_t err_reason; //解析失败原因
     PKT_TRANS_LAYER_U trans_info; //tcp,udp信息 
 }PKT_INFO_S;
 #pragma pack()
@@ -121,7 +133,8 @@ typedef struct
 #define UDP_HLEN        (uint16_t)8
 #define TCP_SN(p)		ntohl(((PKT_TCP_HEADER_S*)(p))->seq)
 #define TCP_ACK(p)		ntohl(((PKT_TCP_HEADER_S*)(p))->ack)
-#define TCP_HLEN(p)		((((PKT_TCP_HEADER_S*)(p))->flags&0x00F0)>>2)
+//#define TCP_HLEN(p)		((((PKT_TCP_HEADER_S*)(p))->flags&0x00F0)>>2)
+#define TCP_HLEN(p)		(((ntohs(((PKT_TCP_HEADER_S*)(p))->flags)) >> 12) << 2)
 #define TCP_SPORT(p)	ntohs(((PKT_TCP_HEADER_S *)(p))->sport)			/*Tcp包源端口*/
 #define TCP_DPORT(p)    ntohs(((PKT_TCP_HEADER_S *)(p))->dport)			/*Tcp包目的端口*/
 #define TCP_WIN(p)      ntohs(((PKT_TCP_HEADER_S *)(p))->win)
